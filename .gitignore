@@ -1,0 +1,8 @@
+.claude/memory/
+.venv/
+__pycache__/
+*.duckdb
+*.duckdb.wal
+.env
+__marimo__/
+vendor/
