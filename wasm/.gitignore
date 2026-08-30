@@ -1,0 +1,4 @@
+node_modules/
+www/*.wasm
+www/*.zarr/
+server.log

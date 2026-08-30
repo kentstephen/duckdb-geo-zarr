@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>duckdb-zarr in duckdb-wasm</title>
+<pre id="out">booting...</pre>
+<script type="module">
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
+const out = document.getElementById("out");
+const log = (s) => { out.textContent += "\n" + s; console.log(s); };
+const base = location.origin;
+try {
+  const bundles = duckdb.getJsDelivrBundles();
+  const bundle = await duckdb.selectBundle(bundles);
+  const workerUrl = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }));
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), new Worker(workerUrl));
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  await db.open({ allowUnsignedExtensions: true });
+  const c = await db.connect();
+  const q = async (sql) => { const t = await c.query(sql); return t.toArray().map(r => JSON.stringify(Object.fromEntries(r), (k, v) => typeof v === "bigint" ? v.toString() : v)); };
+  log("bundle: " + bundle.mainModule.split("/").pop());
+  log("version: " + (await q("SELECT version() AS v"))[0]);
+  log("platform: " + (await q("PRAGMA platform"))[0]);
+  await c.query(`LOAD '${base}/zarr.duckdb_extension.wasm'`);
+  log("LOAD ok");
+  log("loaded: " + (await q("SELECT extension_name, extension_version FROM duckdb_extensions() WHERE loaded AND extension_name='zarr'"))[0]);
+  for (const store of ["consolidated_v2_http.zarr", "consolidated_v3_http.zarr"]) {
+    const url = `${base}/${store}`;
+    log(`\n== ${store}`);
+    log("metadata:\n  " + (await q(`SELECT name, dims, shape, dtype FROM read_zarr_metadata('${url}')`)).join("\n  "));
+    log("rows:\n  " + (await q(`SELECT * FROM read_zarr('${url}') LIMIT 3`)).join("\n  "));
+    log("agg: " + (await q(`SELECT count(*) AS n, round(avg(temperature),3) AS mean_t FROM read_zarr('${url}')`))[0]);
+    log("replacement scan: " + (await q(`SELECT count(*) AS n FROM '${url}'`))[0]);
+  }
+  log("\nDONE");
+} catch (e) { log("ERROR: " + (e && e.message ? e.message : e)); log("DONE"); }
+</script>

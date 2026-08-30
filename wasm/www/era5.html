@@ -1,0 +1,42 @@
+<!doctype html><meta charset="utf-8"><title>ARCO ERA5 via duckdb-zarr in duckdb-wasm</title>
+<style>body{font:14px/1.4 -apple-system,system-ui,sans-serif;margin:1.5rem;max-width:70rem} pre{white-space:pre-wrap;background:#f4f4f4;padding:.75rem;border-radius:6px} textarea{width:100%;height:5rem;font:13px ui-monospace,monospace} button{padding:.4rem .9rem}</style>
+<h2>ARCO ERA5 (1°, hourly, 1959-2022) in the browser</h2>
+<p>duckdb-wasm + locally built <code>zarr</code> extension. Store: <code>/arco/ar/1959-2022-1h-360x181_equiangular_with_poles_conservative.zarr</code> (proxied to GCS). Chunks are 8 hourly timesteps of the full 360x181 grid. Bound scans with <code>ranges=['time:lo:hi', ...]</code> (raw coordinate values; <code>time</code> is hours since 1959-01-01, so 2020-07-01T00 = 539088) and repeat the bounds in <code>WHERE</code>.</p>
+<textarea id="sql">SELECT time, round(avg("2m_temperature")-273.15,2) AS mean_c
+FROM read_zarr(store(), array_path='2m_temperature', ranges=['time:539088:539111','latitude:40:50','longitude:-10:5'])
+WHERE time BETWEEN 539088 AND 539111 AND latitude BETWEEN 40 AND 50 AND longitude BETWEEN -10 AND 5
+GROUP BY 1 ORDER BY 1</textarea>
+<div><button id="run">Run</button> <span id="status"></span></div>
+<pre id="out">booting...</pre>
+<script type="module">
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
+const out = document.getElementById("out"), status = document.getElementById("status");
+const log = (s) => { out.textContent += "\n" + s; console.log(s); };
+const STORE = `${location.origin}/arco/ar/1959-2022-1h-360x181_equiangular_with_poles_conservative.zarr`;
+const fmt = (t) => t.toArray().map(r => JSON.stringify(Object.fromEntries(r), (k, v) => typeof v === "bigint" ? v.toString() : v)).join("\n  ");
+let c;
+async function q(sql) { const t0 = performance.now(); const t = await c.query(sql); return `(${((performance.now()-t0)/1000).toFixed(2)}s)\n  ` + fmt(t); }
+try {
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const worker = new Worker(URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })));
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  await db.open({ allowUnsignedExtensions: true });
+  c = await db.connect();
+  await c.query(`LOAD '${location.origin}/zarr.duckdb_extension.wasm'`);
+  log("extension loaded; " + (await q("SELECT version() AS duckdb, current_setting('threads') AS threads")));
+  log("\nmetadata " + (await q(`SELECT name, shape, dtype FROM read_zarr_metadata('${STORE}') WHERE name IN ('time','latitude','longitude','2m_temperature','temperature','geopotential')`)));
+  log("\ngroups " + (await q(`SELECT dims, shape FROM read_zarr_groups('${STORE}')`)));
+  await c.query(`CREATE VIEW era5_t2m AS SELECT * FROM read_zarr('${STORE}', array_path='2m_temperature')`);
+  await c.query(`CREATE MACRO store() AS '${STORE}'`);
+  log("\nfirst rows " + (await q(`SELECT time, latitude, longitude, "2m_temperature" FROM era5_t2m LIMIT 3`)));
+  log("\nglobal mean 2m temperature, first timestep (1959-01-01T00) " + (await q(`SELECT count(*) AS cells, round(avg("2m_temperature")-273.15,2) AS mean_c, round(min("2m_temperature")-273.15,1) AS min_c, round(max("2m_temperature")-273.15,1) AS max_c FROM (SELECT * FROM era5_t2m LIMIT 65160)`)));
+  log("\nzonal means, first timestep " + (await q(`SELECT latitude, round(avg("2m_temperature")-273.15,1) AS mean_c FROM (SELECT * FROM era5_t2m LIMIT 65160) WHERE latitude IN (-90,-60,-30,0,30,60,90) GROUP BY 1 ORDER BY 1`)));
+  const H0 = 539088; // 2020-07-01T00 in hours since 1959-01-01
+  log(`\npruned: 2020-07-01, lat 40..50, lon -10..5 (ranges= prunes to 3 of 69,033 chunks) ` + (await q(`SELECT count(*) AS cells, round(avg("2m_temperature")-273.15,2) AS mean_c FROM read_zarr('${STORE}', array_path='2m_temperature', ranges=['time:${H0}:${H0+23}','latitude:40:50','longitude:-10:5']) WHERE time BETWEEN ${H0} AND ${H0+23} AND latitude BETWEEN 40 AND 50 AND longitude BETWEEN -10 AND 5`)));
+  log(`\npruned: global hourly mean, first 4 hours of 2020-07-01 ` + (await q(`SELECT time, round(avg("2m_temperature")-273.15,2) AS mean_c FROM read_zarr('${STORE}', array_path='2m_temperature', ranges=['time:${H0}:${H0+3}']) WHERE time BETWEEN ${H0} AND ${H0+3} GROUP BY 1 ORDER BY 1`)));
+  log("\nDONE");
+  status.textContent = "ready";
+  document.getElementById("run").onclick = async () => { status.textContent = "running..."; try { log("\n> " + document.getElementById("sql").value + "\n" + (await q(document.getElementById("sql").value))); } catch (e) { log("ERROR: " + e.message); } status.textContent = "ready"; };
+} catch (e) { log("ERROR: " + (e && e.message ? e.message : e)); log("DONE"); }
+</script>
