@@ -46,7 +46,8 @@ and passes 404s through (the store probes `zarr.json` before `.zmetadata`).
 
 - no planner-driven predicate pushdown in the extension (native either; the DuckDB C API
   has no filter hook). Use the branch's `ranges=['time:539088:539111','latitude:40:50']`
-  named parameter on `read_zarr` (raw coordinate values, inclusive; ERA5 `time` is hours
+  named parameter on `read_zarr` (inclusive; raw coordinate values, or ISO dates on a
+  dimension with CF `units`: `time:2020-07-01:2020-07-01T23` on ERA5, whose `time` is hours
   since 1959-01-01). Chunks outside the range are never fetched and rows outside it are
   clipped, so no `WHERE` repeat is needed. Without `ranges=`, `WHERE time = x` scans all
   552k timesteps; LIMIT-bounded scans are still cheap because the scan streams

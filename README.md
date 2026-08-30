@@ -34,8 +34,9 @@ Status 2026-08-29: `zarr.duckdb_extension.wasm` loads into duckdb-wasm 1.33.1-de
 GCS through a CORS proxy: metadata in 0.6s, one-timestep global aggregate in 0.4s. Results
 match native.
 
-Chunk pruning: the branch adds `ranges=['dim:lo:hi', ...]` to `read_zarr` (raw coordinate
-values, inclusive, either bound may be empty). Chunks whose coordinate min/max miss the
+Chunk pruning: the branch adds `ranges=['dim:lo:hi', ...]` to `read_zarr` (inclusive, either
+bound may be empty; bounds are raw coordinate values, or ISO dates such as
+`time:2020-07-01:2020-07-01T23` on a dimension with CF `units` like `hours since 1959-01-01`). Chunks whose coordinate min/max miss the
 range are never read, and rows outside the range inside kept chunks are clipped, so the
 bounds are written once. One July 2020 day over a Western Europe box reads 3 of 69,033
 chunks: 1.6s in the browser, 2.6s native. The pruning passes the boundary cases listed in
