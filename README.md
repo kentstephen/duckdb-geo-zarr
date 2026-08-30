@@ -44,6 +44,8 @@ upstream `docs/design.md` (decreasing coords, non-uniform spacing, chunk-seam po
 predicate, empty result, inclusive bounds). Planner-driven pushdown (bounds inferred from
 `WHERE`) remains blocked on the DuckDB C API, see `notes/predicate-pushdown-options.md`.
 
+Status and next steps: `notes/status.md`. Map plan: `notes/plan-sql-to-map.md`.
+
 Hosting: Source Cooperative (`data.source.coop`) serves with `Access-Control-Allow-Origin: *`
 and Range support, so a Zarr there is queryable from the browser with no proxy. GCS
 public buckets are not (hence `wasm/serve.py`'s `/arco/` proxy). Icechunk is out for the
