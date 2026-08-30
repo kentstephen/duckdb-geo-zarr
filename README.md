@@ -51,6 +51,7 @@ whatever the window length; "Pin window" materializes a window for instant scrub
 Colormaps from the Source Cooperative zarr-viewer. Details in [`wasm/README.md`](wasm/README.md).
 
 Status and next steps: `notes/status.md`. Map plan: `notes/plan-sql-to-map.md`.
+xarray-sql / DataFusion in the browser: `notes/todo-xarray-sql-wasm.md`.
 
 Hosting: Source Cooperative (`data.source.coop`) serves with `Access-Control-Allow-Origin: *`
 and Range support, so a Zarr there is queryable from the browser with no proxy. GCS
