@@ -44,6 +44,10 @@ upstream `docs/design.md` (decreasing coords, non-uniform spacing, chunk-seam po
 predicate, empty result, inclusive bounds). Planner-driven pushdown (bounds inferred from
 `WHERE`) remains blocked on the DuckDB C API, see `notes/predicate-pushdown-options.md`.
 
+Map: `wasm/www/map.html` draws one day of the store as a deck.gl raster (one `ranges=`
+query into a local table, 24 hourly frames, click or Shift+drag selection back to SQL rows
+and the equivalent `read_zarr` query). Details in [`wasm/README.md`](wasm/README.md).
+
 Status and next steps: `notes/status.md`. Map plan: `notes/plan-sql-to-map.md`.
 
 Hosting: Source Cooperative (`data.source.coop`) serves with `Access-Control-Allow-Origin: *`

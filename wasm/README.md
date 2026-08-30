@@ -22,6 +22,7 @@ cp ../vendor/duckdb-zarr/build/wasm_mvp/release/zarr.duckdb_extension.wasm www/
 cp -r ../vendor/duckdb-zarr/test/fixtures/xarray_tutorial/consolidated_v{2,3}_http.zarr www/
 python3 serve.py www 8765 &      # CORS + Range static server, plus /arco/ proxy to GCS
 node run.mjs                     # headless Chromium, prints the era5.html output
+node run.mjs "map.html#selftest" shot.png   # same for the map page, plus a screenshot
 ```
 
 Pages (open in a normal browser at http://127.0.0.1:8765/...):
@@ -30,6 +31,20 @@ Pages (open in a normal browser at http://127.0.0.1:8765/...):
 - `era5.html`: ARCO ERA5 `1959-2022-1h-360x181_equiangular_with_poles_conservative.zarr`
   (blosc/lz4) via the `/arco/` proxy, with a SQL box for ad hoc queries against the
   `era5_t2m` view
+- `map.html`: the same store as a map (deck.gl 9 over MapLibre), with an hour scrubber and
+  playback at a selectable fps. One day is
+  materialized with `ranges=['time:D:DT23']` (3 chunks, ~1.2s) into a local table
+  `day(time, lat, lon, c)`; the 24 hourly frames are pulled as one Float32 column
+  (0.15s) and painted through a diverging blue to yellow/orange LUT (the x-sql-marimo HRRR ramp,
+  pale pivot at the day median, arms scaled to p2 and p98) into 24 `BitmapLayer` textures
+  (`_imageCoordinateSystem: LNGLAT`, half-degree rows so cells stay centered on
+  their integer lat/lon, cropped to +-85). Click a cell or Shift+drag a box: the
+  selection becomes a `WHERE` on `day` for the hourly mean/min/max series (drawn on
+  the time scrubber) and the cell list at the current hour (drawn as rectangles),
+  and the equivalent `read_zarr(..., ranges=[...])` query against the store is shown
+  and can be pasted into the SQL box. Query results with `lat, lon` columns are
+  drawn on the map. `#selftest` in the URL runs a wrap-around box (lon 350..5) and
+  logs it for `run.mjs`.
 
 The proxy exists because `storage.googleapis.com` sends no CORS headers for the
 public ARCO bucket; the browser cannot fetch it directly. The proxy forwards Range
