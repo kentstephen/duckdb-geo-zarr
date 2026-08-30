@@ -1,0 +1,15 @@
+[build]
+  publish = "wasm/dist"
+
+# Same-origin proxy to the public ARCO ERA5 bucket, which sends no CORS headers.
+# Replaces the /arco/ route in wasm/serve.py.
+[[redirects]]
+  from = "/arco/*"
+  to = "https://storage.googleapis.com/gcp-public-data-arco-era5/:splat"
+  status = 200
+  force = true
+
+[[headers]]
+  for = "/zarr.duckdb_extension.wasm"
+  [headers.values]
+    Cache-Control = "public, max-age=3600"

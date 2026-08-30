@@ -22,7 +22,7 @@ try {
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   await db.open({ allowUnsignedExtensions: true });
   c = await db.connect();
-  await c.query(`LOAD '${location.origin}/zarr.duckdb_extension.wasm'`);
+  await c.query(`LOAD '${new URL("zarr.duckdb_extension.wasm", location.href).href}'`);
   log("extension loaded; " + (await q("SELECT version() AS duckdb, current_setting('threads') AS threads")));
   log("\nmetadata " + (await q(`SELECT name, shape, dtype FROM read_zarr_metadata('${STORE}') WHERE name IN ('time','latitude','longitude','2m_temperature','temperature','geopotential')`)));
   log("\ngroups " + (await q(`SELECT dims, shape FROM read_zarr_groups('${STORE}')`)));

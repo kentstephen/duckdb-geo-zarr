@@ -1,0 +1,491 @@
+From ebe9004af083a43073441a5c4d2c06c6e0501ea7 Mon Sep 17 00:00:00 2001
+From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 20:22:24 -0400
+Subject: [PATCH 1/3] wasm32-emscripten support and ranges= chunk pruning for
+ read_zarr
+
+- Gate zarrs_http off wasm; route all stores through DuckDbStore on wasm
+- Single-thread rayon global pool at extension init on wasm
+- CFLAGS -fPIC for zstd-sys on wasm32-unknown-emscripten
+- DuckDbStore::get_partial_many loops on short reads (duckdb-wasm HTTP FS
+  returns 16 KiB pieces)
+- Add ranges=['dim:lo:hi', ...] named param to read_zarr: prunes chunks on
+  coordinate min/max at bind (parse_dim_range, build_work_units_pruned).
+  Kept chunks still emit all rows, so bounds must be repeated in WHERE.
+
+Claude-Session: https://claude.ai/code/session_015DQGNDQN7rRXCfEQ7wL4cr
+---
+ .cargo/config.toml              |   4 +
+ Cargo.lock                      |   1 +
+ Cargo.toml                      |  11 ++
+ src/lib.rs                      |  10 ++
+ src/read_zarr.rs                |  32 ++++-
+ src/zarr_reader/duckdb_store.rs |  24 +++-
+ src/zarr_reader/meta.rs         | 218 +++++++++++++++++++++++++++++++-
+ src/zarr_reader/types.rs        |   2 +-
+ 8 files changed, 290 insertions(+), 12 deletions(-)
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index a1f4f89..1d03f6c 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -24,3 +24,7 @@ rustflags = []
+ 
+ [env]
+ CXXFLAGS_aarch64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
++# duckdb-wasm extensions are emcc side modules, so every object must be PIC.
++# rustc already emits PIC for wasm32-unknown-emscripten; this covers C code built
++# by cc-rs (zstd-sys). Scoped to the wasm triple so native builds are untouched.
++CFLAGS_wasm32_unknown_emscripten = "-fPIC"
+diff --git a/Cargo.lock b/Cargo.lock
+index 1434059..d6ee794 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3206,6 +3206,7 @@ dependencies = [
+  "duckdb",
+  "ndarray",
+  "openssl",
++ "rayon",
+  "serde_json",
+  "zarrs",
+  "zarrs_http",
+diff --git a/Cargo.toml b/Cargo.toml
+index 456d0ad..a8e9886 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -36,8 +36,17 @@ zarrs = { version = "0.23", default-features = false, features = [
+ ndarray = "0.17"
+ serde_json = "1"
+ base64 = "0.22"
++
++# zarrs_http -> reqwest::blocking, which does not exist on wasm32. On wasm,
++# HTTP stores go through DuckDbStore (duckdb-wasm's own httpfs) instead.
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ zarrs_http = "0.3.1"
+ 
++# wasm has no threads: zarrs' rayon usage must run on a pool that never spawns.
++# See zarr_init_c_api_internal.
++[target.'cfg(target_family = "wasm")'.dependencies]
++rayon = "1.12"
++
+ # zarrs_http → reqwest → native-tls → openssl-sys. On Linux the DuckDB CI sets
+ # OPENSSL_DIR to a vcpkg path that doesn't exist. Vendored mode compiles OpenSSL
+ # from source and ignores OPENSSL_DIR entirely. macOS and Windows provide TLS via
+@@ -47,5 +56,7 @@ openssl = { version = "0.10", features = ["vendored"] }
+ 
+ # Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
+ # SKIP_TESTS=1 for that target so blosc is never exercised there in CI.
++# On wasm c-blosc compiles against emscripten's pthread stubs; with nthreads=1
++# (zarrs' default) it never calls pthread_create, so it works without threads.
+ [target.'cfg(not(all(target_os = "windows", target_env = "gnu")))'.dependencies]
+ zarrs = { version = "0.23", default-features = false, features = ["blosc"] }
+diff --git a/src/lib.rs b/src/lib.rs
+index aeb7b9d..935e13c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -23,6 +23,16 @@ unsafe fn zarr_init_c_api_internal(
+         }
+         let db: duckdb::ffi::duckdb_database = *db_ptr;
+ 
++        // wasm has no thread spawning; build rayon's global pool with the current
++        // thread as its only worker so zarrs' parallel iterators run inline.
++        #[cfg(target_family = "wasm")]
++        {
++            let _ = rayon::ThreadPoolBuilder::new()
++                .num_threads(1)
++                .use_current_thread()
++                .build_global();
++        }
++
+         replacement_scan::register(db);
+ 
+         let con = Connection::open_from_raw(db.cast())?;
+diff --git a/src/read_zarr.rs b/src/read_zarr.rs
+index f516621..3f7961a 100644
+--- a/src/read_zarr.rs
++++ b/src/read_zarr.rs
+@@ -6,9 +6,9 @@ use duckdb::core::{DataChunkHandle, LogicalTypeHandle, LogicalTypeId};
+ use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab, Value};
+ 
+ use crate::zarr_reader::meta::{
+-    build_column_defs, build_work_units, dim_group_for_array, dimension_names, extract_file_system,
+-    infer_dim_groups, load_coord_array, open_array, open_store, select_array_name, ZarrArray,
+-    ZarrStore,
++    build_column_defs, build_work_units, build_work_units_pruned, dim_group_for_array,
++    dimension_names, extract_file_system, infer_dim_groups, load_coord_array, open_array,
++    open_store, parse_dim_range, select_array_name, DimRange, ZarrArray, ZarrStore,
+ };
+ use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrDtype};
+ 
+@@ -90,6 +90,17 @@ impl VTab for ReadZarrVTab {
+             return Err("use either array_path= or \"array\"=, not both".into());
+         }
+         let requested_array = array_path.or(array_alias);
++        // Optional ranges= named parameter: chunk pruning bounds on raw
++        // coordinate values, e.g. ranges=['time:536000:536023', 'latitude:40:50'].
++        let ranges: Vec<DimRange> = match bind.get_named_parameter("ranges") {
++            Some(v) => v
++                .to_list()
++                .ok_or("ranges must be a list of 'dim:lo:hi' strings")?
++                .iter()
++                .map(|item| parse_dim_range(&item.to_string()))
++                .collect::<Result<_, _>>()?,
++            None => Vec::new(),
++        };
+ 
+         let fs = unsafe { extract_file_system(bind) };
+         let store = open_store(&store_path, Some(fs))?;
+@@ -116,7 +127,7 @@ impl VTab for ReadZarrVTab {
+                     .into());
+                 }
+             }
+-            return finish_bind(bind, store, &group);
++            return finish_bind(bind, store, &group, &ranges);
+         }
+ 
+         let array_names = crate::zarr_reader::meta::list_array_names(&store_path, &store)?;
+@@ -149,7 +160,7 @@ impl VTab for ReadZarrVTab {
+             }
+         };
+ 
+-        finish_bind(bind, store, group)
++        finish_bind(bind, store, group, &ranges)
+     }
+ 
+     fn supports_pushdown() -> bool {
+@@ -261,6 +272,10 @@ impl VTab for ReadZarrVTab {
+             ),
+             ("array".to_string(), LogicalTypeId::Varchar.into()),
+             ("array_path".to_string(), LogicalTypeId::Varchar.into()),
++            (
++                "ranges".to_string(),
++                LogicalTypeHandle::list(&LogicalTypeId::Varchar.into()),
++            ),
+         ])
+     }
+ }
+@@ -291,6 +306,7 @@ fn finish_bind(
+     bind: &BindInfo,
+     store: ZarrStore,
+     group: &DimGroup,
++    ranges: &[DimRange],
+ ) -> Result<ReadZarrBind, Box<dyn std::error::Error>> {
+     // Load coord arrays.
+     let mut coord_arrays: HashMap<String, CoordArray> = HashMap::new();
+@@ -329,7 +345,11 @@ fn finish_bind(
+         }
+     }
+ 
+-    let work_units = build_work_units(group);
++    let work_units = if ranges.is_empty() {
++        build_work_units(group)
++    } else {
++        build_work_units_pruned(group, &coord_arrays, ranges)?
++    };
+ 
+     Ok(ReadZarrBind {
+         group_shape: group.shape.clone(),
+diff --git a/src/zarr_reader/duckdb_store.rs b/src/zarr_reader/duckdb_store.rs
+index 9b7baf0..9a59328 100644
+--- a/src/zarr_reader/duckdb_store.rs
++++ b/src/zarr_reader/duckdb_store.rs
+@@ -90,11 +90,27 @@ impl ReadableStorageTraits for DuckDbStore {
+                 continue;
+             }
+             let mut buf = vec![0u8; length as usize];
+-            let bytes_read =
+-                unsafe { duckdb_file_handle_read(handle, buf.as_mut_ptr().cast(), length as i64) };
+-            if bytes_read < 0 || bytes_read as u64 != length {
++            // DuckDB file systems may return short reads (duckdb-wasm's HTTP
++            // filesystem hands back 16 KiB pieces), so loop until the buffer
++            // is full or the handle reports EOF (0) / error (<0).
++            let mut filled: usize = 0;
++            let mut bytes_read: i64 = 0;
++            while filled < length as usize {
++                bytes_read = unsafe {
++                    duckdb_file_handle_read(
++                        handle,
++                        buf.as_mut_ptr().add(filled).cast(),
++                        (length as usize - filled) as i64,
++                    )
++                };
++                if bytes_read <= 0 {
++                    break;
++                }
++                filled += bytes_read as usize;
++            }
++            if filled != length as usize {
+                 results.push(Err(StorageError::Other(format!(
+-                    "read of {length} bytes at offset {offset} returned {bytes_read}"
++                    "read of {length} bytes at offset {offset} returned {filled} (last read {bytes_read})"
+                 ))));
+                 continue;
+             }
+diff --git a/src/zarr_reader/meta.rs b/src/zarr_reader/meta.rs
+index aa627a6..9a6e0cd 100644
+--- a/src/zarr_reader/meta.rs
++++ b/src/zarr_reader/meta.rs
+@@ -3,11 +3,14 @@ use std::path::Path;
+ use std::sync::Arc;
+ 
+ use base64::Engine as _;
++#[cfg(not(target_family = "wasm"))]
++use duckdb::ffi::duckdb_destroy_file_system;
+ use duckdb::ffi::{
+     duckdb_client_context, duckdb_client_context_get_file_system, duckdb_destroy_client_context,
+-    duckdb_destroy_file_system, duckdb_file_system, duckdb_table_function_get_client_context,
++    duckdb_file_system, duckdb_table_function_get_client_context,
+ };
+ use zarrs::array::Array;
++#[cfg(not(target_family = "wasm"))]
+ use zarrs::filesystem::FilesystemStore;
+ use zarrs::storage::{Bytes, ReadableStorageTraits, StoreKey};
+ 
+@@ -68,6 +71,18 @@ pub fn open_store(
+     file_system: Option<duckdb_file_system>,
+ ) -> Result<ZarrStore, Box<dyn std::error::Error>> {
+     let lower = path.to_ascii_lowercase();
++    // On wasm there is no reqwest::blocking and no host filesystem: every path
++    // (HTTP included, and files registered in duckdb-wasm's virtual FS) is read
++    // through DuckDB's own FileSystem via DuckDbStore.
++    #[cfg(target_family = "wasm")]
++    let store: ZarrStore = {
++        let _ = &lower;
++        let fs = file_system.ok_or(
++            "wasm build requires a DuckDB FileSystem handle (call from a table function bind)",
++        )?;
++        Arc::new(DuckDbStore::new(fs, path))
++    };
++    #[cfg(not(target_family = "wasm"))]
+     let store: ZarrStore = if lower.starts_with("http://") || lower.starts_with("https://") {
+         if let Some(mut fs) = file_system {
+             unsafe { duckdb_destroy_file_system(&mut fs) };
+@@ -922,6 +937,135 @@ pub fn build_work_units(group: &DimGroup) -> Vec<WorkUnit> {
+         .collect()
+ }
+ 
++/// Inclusive `[lo, hi]` bound on one dimension's raw coordinate values,
++/// as given by `read_zarr(..., ranges=['dim:lo:hi'])`.
++#[derive(Debug, Clone, PartialEq)]
++pub struct DimRange {
++    pub dim: String,
++    pub lo: f64,
++    pub hi: f64,
++}
++
++/// Parse one `dim:lo:hi` item. Either bound may be empty (`time:1000:` is
++/// "time >= 1000"). Values are compared against the raw on-disk coordinate
++/// values, exactly as `read_zarr` emits them in the coordinate columns.
++pub fn parse_dim_range(item: &str) -> Result<DimRange, Box<dyn std::error::Error>> {
++    let parts: Vec<&str> = item.rsplitn(3, ':').collect();
++    if parts.len() != 3 {
++        return Err(
++            format!("range '{item}' must look like 'dim:lo:hi' (bounds may be empty)").into(),
++        );
++    }
++    let (hi, lo, dim) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
++    let bound = |s: &str, default: f64| -> Result<f64, Box<dyn std::error::Error>> {
++        if s.is_empty() {
++            Ok(default)
++        } else {
++            s.parse::<f64>()
++                .map_err(|_| format!("range '{item}': '{s}' is not a number").into())
++        }
++    };
++    Ok(DimRange {
++        dim: dim.to_string(),
++        lo: bound(lo, f64::NEG_INFINITY)?,
++        hi: bound(hi, f64::INFINITY)?,
++    })
++}
++
++/// Raw coordinate value at `idx` as f64 (`None` for bool or out of range).
++fn coord_value_f64(ca: &CoordArray, idx: usize) -> Option<f64> {
++    let w = ca.dtype.byte_size();
++    let b = ca.bytes.get(idx * w..(idx + 1) * w)?;
++    Some(match ca.dtype {
++        ZarrDtype::Bool => return None,
++        ZarrDtype::Int8 => b[0] as i8 as f64,
++        ZarrDtype::Int16 => i16::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::Int32 => i32::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::Int64 => i64::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::UInt8 => b[0] as f64,
++        ZarrDtype::UInt16 => u16::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::UInt32 => u32::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::UInt64 => u64::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::Float32 => f32::from_ne_bytes(b.try_into().ok()?) as f64,
++        ZarrDtype::Float64 => f64::from_ne_bytes(b.try_into().ok()?),
++    })
++}
++
++/// Chunk pruning: keep only the chunks whose coordinate `[min, max]` along each
++/// ranged dimension intersects the requested `[lo, hi]`. Min/max are computed
++/// over the actual coordinate slice (not first/last), so descending coordinates
++/// (ERA5 latitude 90 -> -90) prune correctly. A dimension without a coordinate
++/// array is pruned on its integer index. Rows inside a kept chunk that fall
++/// outside the range are still emitted; the caller's `WHERE` removes them.
++pub fn build_work_units_pruned(
++    group: &DimGroup,
++    coord_arrays: &HashMap<String, CoordArray>,
++    ranges: &[DimRange],
++) -> Result<Vec<WorkUnit>, Box<dyn std::error::Error>> {
++    let ndim = group.dims.len();
++    let mut kept: Vec<Vec<u64>> = (0..ndim)
++        .map(|k| (0..group.shape[k].div_ceil(group.chunk_shape[k])).collect())
++        .collect();
++
++    for r in ranges {
++        let k = group.dims.iter().position(|d| d == &r.dim).ok_or_else(|| {
++            format!(
++                "ranges: '{}' is not a dimension of this table; dims are {:?}",
++                r.dim, group.dims
++            )
++        })?;
++        let n = group.shape[k] as usize;
++        let cs = group.chunk_shape[k] as usize;
++        let ca = coord_arrays.get(&r.dim);
++        if let Some(ca) = ca {
++            if matches!(ca.dtype, ZarrDtype::Bool) {
++                return Err(format!("ranges: dimension '{}' has a bool coordinate", r.dim).into());
++            }
++        }
++        kept[k].retain(|&c| {
++            let start = c as usize * cs;
++            let end = (start + cs).min(n);
++            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
++            for i in start..end {
++                let v = match ca {
++                    Some(ca) => match coord_value_f64(ca, i) {
++                        Some(v) if !v.is_nan() => v,
++                        _ => continue,
++                    },
++                    None => i as f64,
++                };
++                lo = lo.min(v);
++                hi = hi.max(v);
++            }
++            lo <= r.hi && hi >= r.lo
++        });
++    }
++
++    let mut units = Vec::new();
++    let mut idx = vec![0usize; ndim];
++    if kept.iter().any(|v| v.is_empty()) {
++        return Ok(units);
++    }
++    loop {
++        units.push(WorkUnit {
++            chunk_indices: (0..ndim).map(|k| kept[k][idx[k]]).collect(),
++        });
++        // Odometer increment, last dim fastest (C order).
++        let mut k = ndim;
++        loop {
++            if k == 0 {
++                return Ok(units);
++            }
++            k -= 1;
++            idx[k] += 1;
++            if idx[k] < kept[k].len() {
++                break;
++            }
++            idx[k] = 0;
++        }
++    }
++}
++
+ /// Build `ColumnDef`s for one dim group: dims first, then data vars.
+ pub fn build_column_defs(
+     store: &ZarrStore,
+@@ -1021,4 +1165,76 @@ mod tests {
+         );
+         assert!(cache.contains_key(&StoreKey::new("foo/zarr.json").unwrap()));
+     }
++
++    fn f64_coord(vals: &[f64]) -> CoordArray {
++        CoordArray {
++            dtype: ZarrDtype::Float64,
++            encoding: ColumnEncoding::Plain,
++            sentinel: None,
++            bytes: vals.iter().flat_map(|v| v.to_ne_bytes()).collect(),
++        }
++    }
++
++    #[test]
++    fn parse_dim_range_forms() {
++        assert_eq!(
++            parse_dim_range("lat:40:50").unwrap(),
++            DimRange {
++                dim: "lat".into(),
++                lo: 40.0,
++                hi: 50.0
++            }
++        );
++        let r = parse_dim_range("time:1000:").unwrap();
++        assert_eq!((r.lo, r.hi), (1000.0, f64::INFINITY));
++        let r = parse_dim_range("time::-5").unwrap();
++        assert_eq!((r.lo, r.hi), (f64::NEG_INFINITY, -5.0));
++        assert!(parse_dim_range("lat:40").is_err());
++        assert!(parse_dim_range("lat:a:b").is_err());
++    }
++
++    #[test]
++    fn prune_descending_coord_and_unindexed_dim() {
++        // time: 10 steps, chunks of 4 (3 chunks); lat: 90 -> -90 by 30, chunks of 4 (2 chunks).
++        let group = DimGroup {
++            dims: vec!["time".into(), "lat".into()],
++            shape: vec![10, 7],
++            chunk_shape: vec![4, 4],
++            data_var_names: vec!["t".into()],
++            coord_var_names: vec!["lat".into()],
++        };
++        let mut coords = HashMap::new();
++        coords.insert(
++            "lat".to_string(),
++            f64_coord(&[90.0, 60.0, 30.0, 0.0, -30.0, -60.0, -90.0]),
++        );
++        let all = build_work_units_pruned(&group, &coords, &[]).unwrap();
++        assert_eq!(all.len(), 6);
++        assert_eq!(all, build_work_units(&group));
++
++        // lat in [-40, -20]: only the second lat chunk (-30..-90) intersects.
++        let r = vec![parse_dim_range("lat:-40:-20").unwrap()];
++        let u = build_work_units_pruned(&group, &coords, &r).unwrap();
++        assert_eq!(u.len(), 3);
++        assert!(u.iter().all(|w| w.chunk_indices[1] == 1));
++
++        // time is unindexed: pruned on integer index. time in [4, 5] -> chunk 1 only.
++        let r = vec![
++            parse_dim_range("time:4:5").unwrap(),
++            parse_dim_range("lat:0:100").unwrap(),
++        ];
++        let u = build_work_units_pruned(&group, &coords, &r).unwrap();
++        assert_eq!(u.len(), 1);
++        assert_eq!(u[0].chunk_indices, vec![1, 0]);
++
++        // Empty intersection -> no work units.
++        let r = vec![parse_dim_range("lat:200:300").unwrap()];
++        assert!(build_work_units_pruned(&group, &coords, &r)
++            .unwrap()
++            .is_empty());
++
++        // Unknown dim -> error.
++        let r = vec![parse_dim_range("lon:0:1").unwrap()];
++        assert!(build_work_units_pruned(&group, &coords, &r).is_err());
++    }
+ }
+diff --git a/src/zarr_reader/types.rs b/src/zarr_reader/types.rs
+index 4436a8f..1a022cd 100644
+--- a/src/zarr_reader/types.rs
++++ b/src/zarr_reader/types.rs
+@@ -137,7 +137,7 @@ pub struct CoordArray {
+ }
+ 
+ /// One unit of parallel work: a chunk index tuple for all data variables.
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct WorkUnit {
+     pub chunk_indices: Vec<u64>,
+ }
+-- 
+2.50.1 (Apple Git-155)
+

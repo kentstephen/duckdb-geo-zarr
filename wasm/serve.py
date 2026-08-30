@@ -8,7 +8,9 @@ class H(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Cache-Control", "no-store")
+        # Proxied chunks are immutable; let the browser cache them so a second pass over a
+        # window is local. Local files (the extension, pages) stay uncached.
+        self.send_header("Cache-Control", "public, max-age=86400" if self.path.startswith("/arco/") else "no-store")
         super().end_headers()
     def do_OPTIONS(self):
         self.send_response(204); self.send_header("Access-Control-Allow-Headers", "*"); self.send_header("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS"); self.end_headers()

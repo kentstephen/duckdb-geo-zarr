@@ -44,15 +44,19 @@ upstream `docs/design.md` (decreasing coords, non-uniform spacing, chunk-seam po
 predicate, empty result, inclusive bounds). Planner-driven pushdown (bounds inferred from
 `WHERE`) remains blocked on the DuckDB C API, see `notes/predicate-pushdown-options.md`.
 
-Map: `wasm/www/map.html` draws one day of the store as a deck.gl raster (one `ranges=`
-query into a local table, 24 hourly frames, click or Shift+drag selection back to SQL rows
-and the equivalent `read_zarr` query). Details in [`wasm/README.md`](wasm/README.md).
+Map: `wasm/www/map.html` draws the store as a deck.gl raster over a date window with
+hourly, daily-mean or monthly-mean frames. Every frame and every selection is a streaming
+`read_zarr(..., ranges=[...])` query (table macros `win`/`winbox`), so memory stays flat
+whatever the window length; "Pin window" materializes a window for instant scrubbing.
+Colormaps from the Source Cooperative zarr-viewer. Details in [`wasm/README.md`](wasm/README.md).
 
 Status and next steps: `notes/status.md`. Map plan: `notes/plan-sql-to-map.md`.
 
 Hosting: Source Cooperative (`data.source.coop`) serves with `Access-Control-Allow-Origin: *`
 and Range support, so a Zarr there is queryable from the browser with no proxy. GCS
-public buckets are not (hence `wasm/serve.py`'s `/arco/` proxy). Icechunk is out for the
+public buckets are not, so the ERA5 pages go through a same-origin `/arco/` proxy:
+`wasm/serve.py` locally, a `200` rewrite in `netlify.toml` on the live site
+(https://duckdb-geo-zarr.netlify.app). Icechunk is out for the
 wasm build: the Rust crate drags tokio, reqwest, object_store and opentelemetry, and there
 is no JS reader either.
 

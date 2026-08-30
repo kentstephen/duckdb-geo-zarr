@@ -1,0 +1,470 @@
+From e9945b74eacd105119e3a7ed367ce11633baaada Mon Sep 17 00:00:00 2001
+From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 20:45:24 -0400
+Subject: [PATCH 3/3] ranges=: accept ISO date bounds via CF time units
+
+A bound that is not a number is resolved at bind against the coordinate's
+CF `units` attribute (`<unit> since <epoch>`; seconds/minutes/hours/days,
+standard/gregorian/proleptic_gregorian calendars) into the coordinate's own
+raw values, so `time:2020-07-01:2020-07-01T23` works on ERA5 without the
+user computing hours since 1959. Bounds are parsed as text (DimRangeSpec)
+and resolved once coordinates are loaded. The lo:hi separator is found by
+choosing the colon at which both sides are well-formed tokens, since ISO
+times contain colons. No new dependencies: civil-date arithmetic is inline.
+
+Claude-Session: https://claude.ai/code/session_015DQGNDQN7rRXCfEQ7wL4cr
+---
+ src/read_zarr.rs         |  17 ++-
+ src/zarr_reader/meta.rs  | 295 ++++++++++++++++++++++++++++++++++++---
+ src/zarr_reader/types.rs |   4 +
+ test/sql/read_zarr.test  |  26 ++++
+ 4 files changed, 318 insertions(+), 24 deletions(-)
+
+diff --git a/src/read_zarr.rs b/src/read_zarr.rs
+index 3ae23bd..1e85fab 100644
+--- a/src/read_zarr.rs
++++ b/src/read_zarr.rs
+@@ -8,8 +8,8 @@ use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab, Value};
+ use crate::zarr_reader::meta::{
+     build_column_defs, build_dim_keep_masks, build_work_units, build_work_units_pruned,
+     dim_group_for_array, dimension_names, extract_file_system, infer_dim_groups,
+-    kept_rows_in_chunk, load_coord_array, open_array, open_store, parse_dim_range,
+-    select_array_name, DimRange, ZarrArray, ZarrStore,
++    kept_rows_in_chunk, load_coord_array, open_array, open_store, parse_dim_range_spec,
++    resolve_dim_ranges, select_array_name, DimRangeSpec, ZarrArray, ZarrStore,
+ };
+ use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrDtype};
+ 
+@@ -98,12 +98,12 @@ impl VTab for ReadZarrVTab {
+         let requested_array = array_path.or(array_alias);
+         // Optional ranges= named parameter: chunk pruning bounds on raw
+         // coordinate values, e.g. ranges=['time:536000:536023', 'latitude:40:50'].
+-        let ranges: Vec<DimRange> = match bind.get_named_parameter("ranges") {
++        let ranges: Vec<DimRangeSpec> = match bind.get_named_parameter("ranges") {
+             Some(v) => v
+                 .to_list()
+                 .ok_or("ranges must be a list of 'dim:lo:hi' strings")?
+                 .iter()
+-                .map(|item| parse_dim_range(&item.to_string()))
++                .map(|item| parse_dim_range_spec(&item.to_string()))
+                 .collect::<Result<_, _>>()?,
+             None => Vec::new(),
+         };
+@@ -330,7 +330,7 @@ fn finish_bind(
+     bind: &BindInfo,
+     store: ZarrStore,
+     group: &DimGroup,
+-    ranges: &[DimRange],
++    ranges: &[DimRangeSpec],
+ ) -> Result<ReadZarrBind, Box<dyn std::error::Error>> {
+     // Load coord arrays.
+     let mut coord_arrays: HashMap<String, CoordArray> = HashMap::new();
+@@ -369,12 +369,15 @@ fn finish_bind(
+         }
+     }
+ 
++    // Bounds are resolved here, after the coordinates are loaded, so that
++    // date bounds can use the coordinate's CF `units`.
++    let ranges = resolve_dim_ranges(ranges, &coord_arrays)?;
+     let work_units = if ranges.is_empty() {
+         build_work_units(group)
+     } else {
+-        build_work_units_pruned(group, &coord_arrays, ranges)?
++        build_work_units_pruned(group, &coord_arrays, &ranges)?
+     };
+-    let dim_keep_masks = build_dim_keep_masks(group, &coord_arrays, ranges)?;
++    let dim_keep_masks = build_dim_keep_masks(group, &coord_arrays, &ranges)?;
+ 
+     Ok(ReadZarrBind {
+         group_shape: group.shape.clone(),
+diff --git a/src/zarr_reader/meta.rs b/src/zarr_reader/meta.rs
+index dd369e8..5b8f53e 100644
+--- a/src/zarr_reader/meta.rs
++++ b/src/zarr_reader/meta.rs
+@@ -899,11 +899,14 @@ pub fn load_coord_array(
+         "coord byte count mismatch for '{coord_name}'"
+     );
+ 
++    let attr_str = |k: &str| attrs.get(k).and_then(|v| v.as_str()).map(str::to_string);
+     Ok(CoordArray {
+         dtype,
+         encoding,
+         sentinel,
+         bytes,
++        units: attr_str("units"),
++        calendar: attr_str("calendar"),
+     })
+ }
+ 
+@@ -948,32 +951,199 @@ pub struct DimRange {
+     pub hi: f64,
+ }
+ 
+-/// Parse one `dim:lo:hi` item. Either bound may be empty (`time:1000:` is
+-/// "time >= 1000"). Values are compared against the raw on-disk coordinate
+-/// values, exactly as `read_zarr` emits them in the coordinate columns.
+-pub fn parse_dim_range(item: &str) -> Result<DimRange, Box<dyn std::error::Error>> {
+-    let parts: Vec<&str> = item.rsplitn(3, ':').collect();
+-    if parts.len() != 3 {
+-        return Err(
+-            format!("range '{item}' must look like 'dim:lo:hi' (bounds may be empty)").into(),
+-        );
++/// One `dim:lo:hi` item as written, before the bounds are resolved against
++/// the coordinate array (see `resolve_dim_range`).
++#[derive(Debug, Clone, PartialEq)]
++pub struct DimRangeSpec {
++    pub dim: String,
++    pub lo: String,
++    pub hi: String,
++}
++
++/// Split one `dim:lo:hi` item. Either bound may be empty (`time:1000:` is
++/// "time >= 1000"). The dim name is the text before the first `:`. Because an
++/// ISO time-of-day bound contains colons itself (`time:2020-07-01T00:00:2020-07-02`),
++/// the `lo:hi` separator is the colon at which both sides are well-formed
++/// bound tokens (empty, a number, or an ISO date / date-time).
++pub fn parse_dim_range_spec(item: &str) -> Result<DimRangeSpec, Box<dyn std::error::Error>> {
++    let err = || -> Box<dyn std::error::Error> {
++        format!("range '{item}' must look like 'dim:lo:hi' (bounds may be empty)").into()
++    };
++    let (dim, rest) = item.split_once(':').ok_or_else(err)?;
++    let (lo, hi) = split_bounds(rest).ok_or_else(err)?;
++    Ok(DimRangeSpec {
++        dim: dim.trim().to_string(),
++        lo: lo.to_string(),
++        hi: hi.to_string(),
++    })
++}
++
++/// Find the unique `:` in `lo:hi` at which both sides are bound tokens.
++fn split_bounds(rest: &str) -> Option<(&str, &str)> {
++    let mut found = None;
++    for (i, _) in rest.match_indices(':') {
++        let (lo, hi) = (rest[..i].trim(), rest[i + 1..].trim());
++        if is_bound_token(lo) && is_bound_token(hi) {
++            if found.is_some() {
++                return None; // ambiguous
++            }
++            found = Some((lo, hi));
++        }
++    }
++    found
++}
++
++/// Empty, a number, or `YYYY-MM-DD[[T| ]HH[:MM[:SS[.fff]]]][Z]`.
++fn is_bound_token(s: &str) -> bool {
++    if s.is_empty() || s.parse::<f64>().is_ok() {
++        return true;
++    }
++    let s = s.strip_suffix('Z').unwrap_or(s);
++    let (date, time) = match s.find(['T', ' ']) {
++        Some(i) => (&s[..i], Some(&s[i + 1..])),
++        None => (s, None),
++    };
++    let mut d = date.split('-');
++    let date_ok = (0..3).all(|_| {
++        d.next()
++            .is_some_and(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
++    }) && d.next().is_none();
++    if !date_ok {
++        return false;
++    }
++    match time {
++        None => true,
++        Some(t) => {
++            let parts: Vec<&str> = t.split(':').collect();
++            (1..=3).contains(&parts.len())
++                && parts.iter().enumerate().all(|(k, p)| {
++                    !p.is_empty()
++                        && p.bytes()
++                            .all(|c| c.is_ascii_digit() || (k == 2 && c == b'.'))
++                })
++        }
+     }
+-    let (hi, lo, dim) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
++}
++
++/// Parse and resolve a range with no coordinate context (numeric bounds only).
++#[cfg(test)]
++pub fn parse_dim_range(item: &str) -> Result<DimRange, Box<dyn std::error::Error>> {
++    resolve_dim_range(&parse_dim_range_spec(item)?, None)
++}
++
++/// Resolve the textual bounds of a spec to raw coordinate values. A bound is
++/// a number, or (when the coordinate carries CF `units` of the form
++/// `<unit> since <epoch>`) an ISO date or date-time, converted into the
++/// coordinate's own units. Only the standard / gregorian / proleptic_gregorian
++/// calendars are supported for date bounds.
++pub fn resolve_dim_range(
++    spec: &DimRangeSpec,
++    coord: Option<&CoordArray>,
++) -> Result<DimRange, Box<dyn std::error::Error>> {
+     let bound = |s: &str, default: f64| -> Result<f64, Box<dyn std::error::Error>> {
+         if s.is_empty() {
+-            Ok(default)
+-        } else {
+-            s.parse::<f64>()
+-                .map_err(|_| format!("range '{item}': '{s}' is not a number").into())
++            return Ok(default);
+         }
++        if let Ok(v) = s.parse::<f64>() {
++            return Ok(v);
++        }
++        let dim = &spec.dim;
++        let units = coord.and_then(|c| c.units.as_deref()).ok_or_else(|| {
++            format!("range '{dim}': '{s}' is not a number and '{dim}' has no CF time units")
++        })?;
++        let calendar = coord.and_then(|c| c.calendar.as_deref());
++        cf_time_to_units(s, units, calendar)
++            .map_err(|e| format!("range '{dim}': cannot resolve '{s}': {e}").into())
+     };
+     Ok(DimRange {
+-        dim: dim.to_string(),
+-        lo: bound(lo, f64::NEG_INFINITY)?,
+-        hi: bound(hi, f64::INFINITY)?,
++        dim: spec.dim.clone(),
++        lo: bound(&spec.lo, f64::NEG_INFINITY)?,
++        hi: bound(&spec.hi, f64::INFINITY)?,
+     })
+ }
+ 
++/// Resolve every spec against the loaded coordinates (`None` for unindexed dims).
++pub fn resolve_dim_ranges(
++    specs: &[DimRangeSpec],
++    coord_arrays: &HashMap<String, CoordArray>,
++) -> Result<Vec<DimRange>, Box<dyn std::error::Error>> {
++    specs
++        .iter()
++        .map(|s| resolve_dim_range(s, coord_arrays.get(&s.dim)))
++        .collect()
++}
++
++/// Convert an ISO date/date-time to a value in CF `units` (`<unit> since <epoch>`).
++pub fn cf_time_to_units(
++    value: &str,
++    units: &str,
++    calendar: Option<&str>,
++) -> Result<f64, Box<dyn std::error::Error>> {
++    match calendar.map(|c| c.to_ascii_lowercase()).as_deref() {
++        None | Some("standard") | Some("gregorian") | Some("proleptic_gregorian") => {}
++        Some(other) => return Err(format!("calendar '{other}' is not supported").into()),
++    }
++    let (unit, epoch) = units
++        .split_once(" since ")
++        .ok_or_else(|| format!("units '{units}' are not '<unit> since <epoch>'"))?;
++    let unit_seconds = match unit.trim().to_ascii_lowercase().as_str() {
++        "seconds" | "second" | "secs" | "sec" | "s" => 1.0,
++        "minutes" | "minute" | "mins" | "min" => 60.0,
++        "hours" | "hour" | "hrs" | "hr" | "h" => 3600.0,
++        "days" | "day" | "d" => 86400.0,
++        u => return Err(format!("time unit '{u}' is not supported").into()),
++    };
++    let epoch_s = iso_to_unix_seconds(epoch.trim())?;
++    let value_s = iso_to_unix_seconds(value)?;
++    Ok((value_s - epoch_s) / unit_seconds)
++}
++
++/// Seconds since 1970-01-01T00:00:00 for `YYYY-MM-DD[[T| ]HH[:MM[:SS[.fff]]]][Z]`
++/// on the proleptic Gregorian calendar. Also accepts CF epochs like `1-1-1`.
++fn iso_to_unix_seconds(s: &str) -> Result<f64, Box<dyn std::error::Error>> {
++    let s = s.trim().trim_end_matches('Z');
++    let bad = || -> Box<dyn std::error::Error> { format!("'{s}' is not an ISO date-time").into() };
++    let (date, time) = match s.find(['T', ' ']) {
++        Some(i) => (&s[..i], Some(s[i + 1..].trim())),
++        None => (s, None),
++    };
++    let mut d = date.split('-');
++    let y: i64 = d.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
++    let m: i64 = d.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
++    let day: i64 = d.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
++    if d.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
++        return Err(bad());
++    }
++    let mut secs = 0.0;
++    if let Some(t) = time.filter(|t| !t.is_empty()) {
++        let mut parts = t.split(':');
++        let h: f64 = parts.next().ok_or_else(bad)?.parse().map_err(|_| bad())?;
++        let mi: f64 = parts
++            .next()
++            .map_or(Ok(0.0), |p| p.parse())
++            .map_err(|_| bad())?;
++        let se: f64 = parts
++            .next()
++            .map_or(Ok(0.0), |p| p.parse())
++            .map_err(|_| bad())?;
++        if parts.next().is_some() || !(0.0..24.0).contains(&h) || !(0.0..60.0).contains(&mi) {
++            return Err(bad());
++        }
++        secs = h * 3600.0 + mi * 60.0 + se;
++    }
++    Ok(days_from_civil(y, m, day) as f64 * 86400.0 + secs)
++}
++
++/// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant's algorithm).
++fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
++    let y = if m <= 2 { y - 1 } else { y };
++    let era = if y >= 0 { y } else { y - 399 } / 400;
++    let yoe = y - era * 400;
++    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
++    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++    era * 146097 + doe - 719468
++}
++
+ /// Raw coordinate value at `idx` as f64 (`None` for bool or out of range).
+ pub(crate) fn coord_value_f64(ca: &CoordArray, idx: usize) -> Option<f64> {
+     let w = ca.dtype.byte_size();
+@@ -1264,6 +1434,8 @@ mod tests {
+             encoding: ColumnEncoding::Plain,
+             sentinel: None,
+             bytes: vals.iter().flat_map(|v| v.to_ne_bytes()).collect(),
++            units: None,
++            calendar: None,
+         }
+     }
+ 
+@@ -1505,4 +1677,93 @@ mod tests {
+         let rows = kept_rows_in_chunk(&wu, &g.chunk_shape, &[4, 1, 2], &masks).unwrap();
+         assert_eq!(rows, vec![1, 3, 5, 7]);
+     }
++
++    // ---- Typed (date) bounds via CF units ----
++
++    fn time_coord(vals: &[f64], units: &str, calendar: Option<&str>) -> CoordArray {
++        let mut c = f64_coord(vals);
++        c.units = Some(units.to_string());
++        c.calendar = calendar.map(str::to_string);
++        c
++    }
++
++    #[test]
++    fn spec_split_handles_iso_times_with_colons() {
++        let s = parse_dim_range_spec("time:2020-07-01T00:00:2020-07-01T23:00:00").unwrap();
++        assert_eq!(
++            (s.lo.as_str(), s.hi.as_str()),
++            ("2020-07-01T00:00", "2020-07-01T23:00:00")
++        );
++        let s = parse_dim_range_spec("time:2020-07-01:").unwrap();
++        assert_eq!((s.lo.as_str(), s.hi.as_str()), ("2020-07-01", ""));
++        let s = parse_dim_range_spec("time::2020-07-01 12:30").unwrap();
++        assert_eq!((s.lo.as_str(), s.hi.as_str()), ("", "2020-07-01 12:30"));
++        let s = parse_dim_range_spec("lat:-10.5:5").unwrap();
++        assert_eq!((s.lo.as_str(), s.hi.as_str()), ("-10.5", "5"));
++        assert!(parse_dim_range_spec("lat:40").is_err());
++        assert!(parse_dim_range_spec("lat").is_err());
++    }
++
++    #[test]
++    fn cf_time_conversion() {
++        assert_eq!(days_from_civil(1970, 1, 1), 0);
++        assert_eq!(days_from_civil(2000, 3, 1), 11017);
++        assert_eq!(days_from_civil(1800, 1, 1), -62091);
++        let u = "hours since 1959-01-01";
++        assert_eq!(cf_time_to_units("2020-07-01", u, None).unwrap(), 539088.0);
++        assert_eq!(
++            cf_time_to_units("2020-07-01T23", u, Some("proleptic_gregorian")).unwrap(),
++            539111.0
++        );
++        assert_eq!(
++            cf_time_to_units("2020-07-01 12:30", u, None).unwrap(),
++            539100.5
++        );
++        assert_eq!(
++            cf_time_to_units(
++                "2013-07-02T12:00:00Z",
++                "hours since 1800-01-01",
++                Some("standard")
++            )
++            .unwrap(),
++            1871508.0
++        );
++        assert_eq!(
++            cf_time_to_units("1970-01-02", "seconds since 1970-01-01T00:00:00Z", None).unwrap(),
++            86400.0
++        );
++        assert_eq!(
++            cf_time_to_units("2000-01-01", "days since 2000-01-01 00:00:00", None).unwrap(),
++            0.0
++        );
++        assert_eq!(
++            cf_time_to_units("2000-01-01T00:30", "minutes since 2000-01-01", None).unwrap(),
++            30.0
++        );
++        assert!(cf_time_to_units("2000-01-01", "days since 2000-01-01", Some("360_day")).is_err());
++        assert!(cf_time_to_units("2000-01-01", "kelvin", None).is_err());
++        assert!(cf_time_to_units("2000-13-01", "days since 2000-01-01", None).is_err());
++        assert!(cf_time_to_units("yesterday", "days since 2000-01-01", None).is_err());
++    }
++
++    #[test]
++    fn resolve_date_bounds_against_coord_units() {
++        let c = time_coord(
++            &[539080.0, 539088.0, 539100.0],
++            "hours since 1959-01-01",
++            None,
++        );
++        let spec = parse_dim_range_spec("time:2020-07-01:2020-07-01T23").unwrap();
++        let r = resolve_dim_range(&spec, Some(&c)).unwrap();
++        assert_eq!((r.lo, r.hi), (539088.0, 539111.0));
++        // Numbers still work on a time coord, and mixing is fine.
++        let spec = parse_dim_range_spec("time:539088:2020-07-02").unwrap();
++        let r = resolve_dim_range(&spec, Some(&c)).unwrap();
++        assert_eq!((r.lo, r.hi), (539088.0, 539112.0));
++        // A date bound on a coord without units is an error, as is one on an unindexed dim.
++        let plain = f64_coord(&[0.0, 1.0]);
++        let spec = parse_dim_range_spec("lat:2020-07-01:").unwrap();
++        assert!(resolve_dim_range(&spec, Some(&plain)).is_err());
++        assert!(resolve_dim_range(&spec, None).is_err());
++    }
+ }
+diff --git a/src/zarr_reader/types.rs b/src/zarr_reader/types.rs
+index 1a022cd..d8766dc 100644
+--- a/src/zarr_reader/types.rs
++++ b/src/zarr_reader/types.rs
+@@ -134,6 +134,10 @@ pub struct CoordArray {
+     pub sentinel: Option<FillSentinel>,
+     /// Row-major bytes, length = `n * dtype.byte_size()`.
+     pub bytes: Vec<u8>,
++    /// CF `units` attribute (e.g. `hours since 1959-01-01`), when present.
++    pub units: Option<String>,
++    /// CF `calendar` attribute, when present.
++    pub calendar: Option<String>,
+ }
+ 
+ /// One unit of parallel work: a chunk index tuple for all data variables.
+diff --git a/test/sql/read_zarr.test b/test/sql/read_zarr.test
+index 9da1499..5794c9c 100644
+--- a/test/sql/read_zarr.test
++++ b/test/sql/read_zarr.test
+@@ -493,3 +493,29 @@ statement error
+ SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr', ranges=['lat:40']);
+ ----
+ dim:lo:hi
++
++# Date bounds: air_temperature time has units 'hours since 1800-01-01', so ISO
++# dates resolve to raw hours (2013-07-02T00 = 1871496). Same rows as the numeric form.
++query I
++SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr',
++    ranges=['time:2013-07-02:2013-07-02T18:00', 'lat:40:50', 'lon:230:250']);
++----
++180
++
++query I
++SELECT COUNT(DISTINCT time) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr',
++    ranges=['time:2013-07-02T12:00:00:2013-07-02T12:00:00']);
++----
++1
++
++query R
++SELECT MIN(time) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr',
++    ranges=['time:2013-07-02:']);
++----
++1871496.000000
++
++# Date bound on a dimension whose units are not '<unit> since <epoch>' is an error.
++statement error
++SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr', ranges=['lat:2013-07-02:']);
++----
++not '<unit> since <epoch>'
+-- 
+2.50.1 (Apple Git-155)
+

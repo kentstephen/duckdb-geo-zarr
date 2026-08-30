@@ -1,0 +1,39 @@
+<!doctype html><meta charset="utf-8"><title>HRRR via duckdb-zarr in duckdb-wasm</title>
+<style>body{font:14px/1.4 -apple-system,system-ui,sans-serif;margin:1.5rem;max-width:70rem} pre{white-space:pre-wrap;background:#f4f4f4;padding:.75rem;border-radius:6px} textarea{width:100%;height:5rem;font:13px ui-monospace,monospace} button{padding:.4rem .9rem}</style>
+<h2>NOAA HRRR 48 h forecast (3 km CONUS) in the browser</h2>
+<p>duckdb-wasm + the <code>zarr</code> extension built for wasm. Store: <code>https://data.source.coop/dynamical/noaa-hrrr-forecast-48-hour/v0.1.0.zarr</code> (dynamical.org, Zarr v3 with sharding, read directly: Source Cooperative sends CORS and Range headers). Dims: <code>init_time</code> (runs every 6 h since 2018-07-13), <code>lead_time</code> (seconds, 0..48 h), <code>y</code>, <code>x</code> (metres on the HRRR Lambert conformal grid). One shard per run; inner chunks are 265 x 300 cells across all 49 leads, so a small box over a whole run costs one chunk. Bound scans with <code>ranges=['dim:lo:hi', ...]</code>: ISO times on <code>init_time</code>, raw values elsewhere, inclusive.</p>
+<textarea id="sql">SELECT lead_time / 3600 AS hour, round(avg(temperature_2m), 2) AS mean_c, round(max(wind_gust_surface), 1) AS gust
+FROM read_zarr(store(), array_path='temperature_2m', ranges=['init_time:2025-08-01T06:2025-08-01T06', 'y:-30000:30000', 'x:-30000:30000']) t
+JOIN read_zarr(store(), array_path='wind_gust_surface', ranges=['init_time:2025-08-01T06:2025-08-01T06', 'y:-30000:30000', 'x:-30000:30000']) g USING (init_time, lead_time, y, x)
+GROUP BY 1 ORDER BY 1</textarea>
+<div><button id="run">Run</button> <span id="status"></span></div>
+<pre id="out">booting...</pre>
+<script type="module">
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
+const out = document.getElementById("out"), status = document.getElementById("status");
+const log = (s) => { out.textContent += "\n" + s; console.log(s); };
+const STORE = "https://data.source.coop/dynamical/noaa-hrrr-forecast-48-hour/v0.1.0.zarr";
+const fmt = (t) => t.toArray().map(r => JSON.stringify(Object.fromEntries(r), (k, v) => typeof v === "bigint" ? v.toString() : v)).join("\n  ");
+let c;
+async function q(sql) { const t0 = performance.now(); const t = await c.query(sql); return `(${((performance.now()-t0)/1000).toFixed(2)}s)\n  ` + fmt(t); }
+try {
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const worker = new Worker(URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })));
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  await db.open({ allowUnsignedExtensions: true });
+  c = await db.connect();
+  await c.query(`LOAD '${new URL("zarr.duckdb_extension.wasm", location.href).href}'`);
+  log("extension loaded; " + (await q("SELECT version() AS duckdb, current_setting('threads') AS threads")));
+  log("\nmetadata " + (await q(`SELECT name, dims, shape, dtype FROM read_zarr_metadata('${STORE}') WHERE name IN ('init_time','lead_time','x','y','latitude','longitude','temperature_2m','composite_reflectivity')`)));
+  log("\ngroups " + (await q(`SELECT dims, shape FROM read_zarr_groups('${STORE}')`)));
+  await c.query(`CREATE MACRO store() AS '${STORE}'`);
+  log("\nruns in the store " + (await q(`SELECT count(*) AS runs, strftime(to_timestamp(min(init_time)), '%Y-%m-%d %HZ') AS first, strftime(to_timestamp(max(init_time)), '%Y-%m-%d %HZ') AS last FROM read_zarr(store(), array_path='ingested_forecast_length')`)));
+  log("\none run, lead 12 h, 60 km box near the grid origin (one inner chunk) " + (await q(`SELECT count(*) AS cells, round(avg(temperature_2m),2) AS mean_c, round(min(temperature_2m),1) AS min_c, round(max(temperature_2m),1) AS max_c FROM read_zarr(store(), array_path='temperature_2m', ranges=['init_time:2025-08-01T06:2025-08-01T06','lead_time:43200:43200','y:-30000:30000','x:-30000:30000'])`)));
+  log("\nsame box, all 49 leads (same chunk) " + (await q(`SELECT lead_time / 3600 AS hour, round(avg(temperature_2m),2) AS mean_c FROM read_zarr(store(), array_path='temperature_2m', ranges=['init_time:2025-08-01T06:2025-08-01T06','y:-30000:30000','x:-30000:30000']) GROUP BY 1 ORDER BY 1 LIMIT 6`)));
+  log("\nwhole CONUS, one lead (24 inner chunks, 1.9M cells) " + (await q(`SELECT count(*) AS cells, round(avg(temperature_2m),2) AS mean_c FROM read_zarr(store(), array_path='temperature_2m', ranges=['init_time:2025-08-01T06:2025-08-01T06','lead_time:43200:43200'])`)));
+  log("\nDONE");
+  status.textContent = "ready";
+  document.getElementById("run").onclick = async () => { status.textContent = "running..."; try { log("\n> " + document.getElementById("sql").value + "\n" + (await q(document.getElementById("sql").value))); } catch (e) { log("ERROR: " + e.message); } status.textContent = "ready"; };
+} catch (e) { log("ERROR: " + (e && e.message ? e.message : e)); log("DONE"); }
+</script>

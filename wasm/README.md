@@ -1,83 +1,126 @@
 # duckdb-zarr in the browser (duckdb-wasm)
 
-Proof that the `zarr` extension, built for `wasm32-unknown-emscripten` from the
-`wasm-attempt` branch in `vendor/duckdb-zarr`, loads into duckdb-wasm and reads
-Zarr v2/v3 stores over HTTP in headless Chromium, including ARCO ERA5 from GCS.
+The `zarr` extension, built for `wasm32-unknown-emscripten` from the patches in
+`../patches/duckdb-zarr/` (branch `wasm-attempt` of a local clone in `vendor/duckdb-zarr`),
+loads into duckdb-wasm and reads Zarr v2/v3 stores over HTTP in Chromium. The pages in
+`www/` are deployed to Netlify (https://duckdb-geo-zarr.netlify.app, `netlify.toml` at
+the repo root, publish dir `wasm/www`) and to GitHub Pages from `main` by
+`.github/workflows/pages.yml`; everything in `www/` is static (the 3.6 MB extension binary and two small fixture stores
+are committed so the site is self-contained).
+
+## Pages
+
+- `/` serves `map.html` (a rewrite in `netlify.toml`); there is no landing page.
+- `map.html`: ARCO ERA5 2 m temperature (1°, hourly, 1959-2022, on GCS) as a deck.gl
+  raster over MapLibre. Pick a date window and a frame mode (hourly, daily mean, monthly
+  mean); each frame is one `read_zarr(..., ranges=[time, ...])` query fetched when shown,
+  with playback and a scrubber. Click a cell or Shift+drag a box: its per-frame
+  mean/min/max curve is one query, drawn on the scrubber, and the cells at the current
+  frame are listed. "Pin window" reads the window into a table so frames and selections
+  become local queries. Colormaps: a blue-to-orange diverging ramp (default) plus the 107
+  maps of the Source Cooperative zarr-viewer (`colormaps.png`, deck.gl-raster's sprite,
+  MIT). `#selftest` / `#selftest-daily` log a box for `run.mjs`. Reads GCS through the
+  same-origin `/arco/` proxy (below).
+- `map-hrrr.html`: NOAA HRRR 48 h forecast (dynamical.org, on Source Cooperative), same
+  design. Nothing is read up front. Pick a run (init date + cycle, or
+  "Latest") and a variable; the 49 forecast hours are frames, each one a
+  `read_zarr(..., ranges=[init, lead])` query fetched when shown, kept for the last 12
+  frames, with a 2-frame lookahead for playback. Click a cell or Shift+drag a box: its
+  per-hour mean/min/max curve is one query (`runbox`), drawn on the scrubber, and the cells
+  at the current hour are listed and outlined. The HRRR grid is Lambert conformal (3 km,
+  1799 x 1059); the page projects with the sphere LCC from `spatial_ref` (checked against
+  the store's `latitude`/`longitude` arrays to under 1 m) and paints each frame into an
+  equirectangular texture through a precomputed pixel-to-cell lookup. Colormaps applied
+  with the middle at the frame median and arms to p2/p98.
+  `?init=2025-08-01T06&var=composite_reflectivity` preselects a run and variable.
+  `#selftest` / `#selftest-var` log a box for `run.mjs`.
+- `hrrr.html`: the HRRR store as a SQL console with timings and a query box.
+- `fixtures.html`: smoke test against two local fixture stores (v2 gzip, v3 zstd).
+- `era5.html`: the ARCO ERA5 store as a SQL console with timings.
+
+The ERA5 pages read `storage.googleapis.com` through a same-origin `/arco/` path: the
+public bucket sends no CORS headers. Locally `serve.py` proxies it; on Netlify a `200`
+rewrite in `netlify.toml` does (`/arco/*` to the bucket, Range passes through and 206
+comes back, checked). On GitHub Pages there is no proxy, so the ERA5 pages do not work
+there.
 
 ## Build the extension
 
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"   # brew install rustup emscripten
-cd vendor/duckdb-zarr && make wasm_mvp
+git clone https://github.com/xqlsystems/duckdb-zarr vendor/duckdb-zarr
+cd vendor/duckdb-zarr && git am ../../patches/duckdb-zarr/*.patch
+make wasm_mvp
 # output: build/wasm_mvp/release/zarr.duckdb_extension.wasm
 # afterwards, for native builds again: rm configure/platform.txt && make configure
 ```
 
-## Run the browser test
+## Run locally
 
 ```sh
 cd wasm
 npm i && npx playwright install chromium
-cp ../vendor/duckdb-zarr/build/wasm_mvp/release/zarr.duckdb_extension.wasm www/
-cp -r ../vendor/duckdb-zarr/test/fixtures/xarray_tutorial/consolidated_v{2,3}_http.zarr www/
+cp ../vendor/duckdb-zarr/build/wasm_mvp/release/zarr.duckdb_extension.wasm www/   # if rebuilt
 python3 serve.py www 8765 &      # CORS + Range static server, plus /arco/ proxy to GCS
-node run.mjs                     # headless Chromium, prints the era5.html output
-node run.mjs "map.html#selftest" shot.png   # same for the map page, plus a screenshot
+node run.mjs hrrr.html           # headless Chromium, prints the page's log
+node run.mjs "map.html#selftest-daily" shot.png   # ERA5 map selftest plus a screenshot
+node run.mjs "map-hrrr.html#selftest-var"          # HRRR map selftest
+BASE=https://duckdb-geo-zarr.netlify.app/ node run.mjs era5.html   # same against the deployed site
+
+Deploy: `npx netlify-cli deploy --prod --dir wasm/www --no-build` (site `duckdb-geo-zarr`, linked in `.netlify/`).
 ```
 
-Pages (open in a normal browser at http://127.0.0.1:8765/...):
+Then open http://127.0.0.1:8765/ in a browser. Any static server works for the HRRR and
+fixture pages as long as it answers Range requests; `serve.py` is only required for ERA5 (the `/arco/` proxy).
 
-- `index.html`: local fixtures (v2 gzip, v3 zstd), smoke test
-- `era5.html`: ARCO ERA5 `1959-2022-1h-360x181_equiangular_with_poles_conservative.zarr`
-  (blosc/lz4) via the `/arco/` proxy, with a SQL box for ad hoc queries against the
-  `era5_t2m` view
-- `map.html`: the same store as a map (deck.gl 9 over MapLibre), with an hour scrubber and
-  playback at a selectable fps. One day is
-  materialized with `ranges=['time:D:DT23']` (3 chunks, ~1.2s) into a local table
-  `day(time, lat, lon, c)`; the 24 hourly frames are pulled as one Float32 column
-  (0.15s) and painted through a diverging blue to yellow/orange LUT (the x-sql-marimo HRRR ramp,
-  pale pivot at the day median, arms scaled to p2 and p98) into 24 `BitmapLayer` textures
-  (`_imageCoordinateSystem: LNGLAT`, half-degree rows so cells stay centered on
-  their integer lat/lon, cropped to +-85). Click a cell or Shift+drag a box: the
-  selection becomes a `WHERE` on `day` for the hourly mean/min/max series (drawn on
-  the time scrubber) and the cell list at the current hour (drawn as rectangles),
-  and the equivalent `read_zarr(..., ranges=[...])` query against the store is shown
-  and can be pasted into the SQL box. Query results with `lat, lon` columns are
-  drawn on the map. `#selftest` in the URL runs a wrap-around box (lon 350..5) and
-  logs it for `run.mjs`.
+## What the pages do
 
-The proxy exists because `storage.googleapis.com` sends no CORS headers for the
-public ARCO bucket; the browser cannot fetch it directly. The proxy forwards Range
-and passes 404s through (the store probes `zarr.json` before `.zmetadata`).
+- boot `@duckdb/duckdb-wasm` from jsDelivr with `allowUnsignedExtensions`
+- `LOAD` the extension from the page's own directory
+- `read_zarr_metadata`, `read_zarr_groups`, `read_zarr` with `ranges=`, aggregates, joins
+  between arrays of the same store, and the `.zarr` replacement scan (fixtures page)
 
-## What the page does
+## The HRRR store
 
-- boots `@duckdb/duckdb-wasm` from jsDelivr with `allowUnsignedExtensions`
-- `LOAD 'http://127.0.0.1:8765/zarr.duckdb_extension.wasm'`
-- `read_zarr_metadata`, `read_zarr`, an aggregate, and the `.zarr` replacement scan
-  against both consolidated fixtures over HTTP
+`https://data.source.coop/dynamical/noaa-hrrr-forecast-48-hour/v0.1.0.zarr`, Zarr v3.
+Dims `init_time` (runs every 6 h since 2018-07-13, seconds since 1970), `lead_time`
+(0..48 h in seconds), `y`, `x` (metres). Data arrays are `sharding_indexed`: one shard per
+run (`[1, 49, 1060, 1800]`), inner chunks `[1, 49, 265, 300]` blosc/zstd. An inner chunk
+holds every lead for a 265 x 300 cell tile, so a box over a whole run costs one chunk and a
+full-CONUS frame costs 24. Source Cooperative sends `Access-Control-Allow-Origin: *` and
+supports Range, so the browser reads it directly. The ISO bound on `init_time`
+(`init_time:2025-08-01T06:2025-08-01T06`) resolves through the array's CF `units`.
 
-## Known limits of the wasm build
-
-- no planner-driven predicate pushdown in the extension (native either; the DuckDB C API
-  has no filter hook). Use the branch's `ranges=['time:539088:539111','latitude:40:50']`
-  named parameter on `read_zarr` (inclusive; raw coordinate values, or ISO dates on a
-  dimension with CF `units`: `time:2020-07-01:2020-07-01T23` on ERA5, whose `time` is hours
-  since 1959-01-01). Chunks outside the range are never fetched and rows outside it are
-  clipped, so no `WHERE` repeat is needed. Without `ranges=`, `WHERE time = x` scans all
-  552k timesteps; LIMIT-bounded scans are still cheap because the scan streams
-- remote stores need consolidated metadata (same as native remote stores)
-- blosc works (c-blosc with nthreads=1 never spawns); rayon runs on a single-thread
-  pool built at extension init
-- `wasm_eh` and `wasm_threads` not yet tried (`make wasm_eh`, `make wasm_threads`)
-
-## Timings seen (ERA5 1 degree, Chromium, proxy on localhost)
+## Timings (Chromium on an M-series Mac, Source Cooperative direct)
 
 | query | time |
 | --- | --- |
-| `read_zarr_metadata` (35 arrays) | 0.6s |
-| `read_zarr_groups` | 0.2s |
-| first 3 rows | 1.3s (one 8-timestep chunk, ~4 MB compressed) |
-| global mean/min/max over first timestep | 0.4s |
-| `ranges=` one day x lat 40..50 x lon -10..5 (3 chunks) | 1.6s |
-| `ranges=` 4 hours, global hourly means (1 chunk) | 0.25s |
+| `read_zarr_metadata` (36 arrays) | 1.1s |
+| first touch of a run: 60 km box, one lead | 4.7s (the run's chunks come down) |
+| same box, all 49 leads | 0.7s |
+| full CONUS, one lead (1.9M cells, 24 chunks) | 0.85s after first touch |
+| full CONUS, all 49 leads, grouped by lead | 13.7s |
+| map frame (query + Arrow to Float32 + texture) | 5s first, ~1s after |
+
+ERA5 (1 degree, through the local proxy): metadata 0.6s, one day x 10 x 15 degree box 1.6s,
+4 hours of global means 0.25s.
+
+## Known limits of the wasm build
+
+- No planner-driven predicate pushdown (native either; the DuckDB C API has no filter hook).
+  `ranges=['dim:lo:hi', ...]` on `read_zarr` is the substitute: inclusive, either bound may
+  be empty, raw coordinate values or ISO dates on a dimension with CF `units`. Chunks
+  outside the range are never fetched and rows outside it are clipped, so no `WHERE`
+  repeat is needed. Without `ranges=`, a `WHERE` scans the whole array.
+- Reading a 1-D coordinate array by `array_path` (`x`, `init_time`) fails with a duplicate
+  column name (the dimension and the value share it); read a 2-D array such as `latitude`
+  or a 1-D array with a different name (`ingested_forecast_length`) instead.
+- `ingested_forecast_length` / `expected_forecast_length` read back as NULL on wasm
+  (float64 with a fill value); untested native.
+- Remote stores need consolidated metadata (`zarr.json` with `consolidated_metadata`, or
+  `.zmetadata`).
+- blosc works (c-blosc with nthreads=1 never spawns); rayon runs on a single-thread pool
+  built at extension init.
+- `wasm_eh` and `wasm_threads` not yet tried (`make wasm_eh`, `make wasm_threads`).
+- Icechunk stores (the dynamical.org `*-analysis` datasets) are out of reach: the Rust
+  crate needs tokio/reqwest/object_store, and there is no JS reader.

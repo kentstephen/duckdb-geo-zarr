@@ -8,3 +8,6 @@ __marimo__/
 vendor/
 data/
 notes/
+
+# Local Netlify folder
+.netlify

@@ -4,7 +4,7 @@
 import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
 const out = document.getElementById("out");
 const log = (s) => { out.textContent += "\n" + s; console.log(s); };
-const base = location.origin;
+const base = new URL(".", location.href).href.replace(/\/$/, "");
 try {
   const bundles = duckdb.getJsDelivrBundles();
   const bundle = await duckdb.selectBundle(bundles);
@@ -17,7 +17,7 @@ try {
   log("bundle: " + bundle.mainModule.split("/").pop());
   log("version: " + (await q("SELECT version() AS v"))[0]);
   log("platform: " + (await q("PRAGMA platform"))[0]);
-  await c.query(`LOAD '${base}/zarr.duckdb_extension.wasm'`);
+  await c.query(`LOAD '${new URL("zarr.duckdb_extension.wasm", location.href).href}'`);
   log("LOAD ok");
   log("loaded: " + (await q("SELECT extension_name, extension_version FROM duckdb_extensions() WHERE loaded AND extension_name='zarr'"))[0]);
   for (const store of ["consolidated_v2_http.zarr", "consolidated_v3_http.zarr"]) {
