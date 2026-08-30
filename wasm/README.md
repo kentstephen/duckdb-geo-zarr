@@ -44,11 +44,12 @@ and passes 404s through (the store probes `zarr.json` before `.zmetadata`).
 
 ## Known limits of the wasm build
 
-- no predicate pushdown in the extension (native either). Use the branch's
-  `ranges=['time:539088:539111','latitude:40:50']` named parameter on `read_zarr` to
-  prune chunks at bind (raw coordinate values; ERA5 `time` is hours since 1959-01-01),
-  and repeat the bounds in `WHERE`. Without `ranges=`, `WHERE time = x` scans all 552k
-  timesteps; LIMIT-bounded scans are still cheap because the scan streams
+- no planner-driven predicate pushdown in the extension (native either; the DuckDB C API
+  has no filter hook). Use the branch's `ranges=['time:539088:539111','latitude:40:50']`
+  named parameter on `read_zarr` (raw coordinate values, inclusive; ERA5 `time` is hours
+  since 1959-01-01). Chunks outside the range are never fetched and rows outside it are
+  clipped, so no `WHERE` repeat is needed. Without `ranges=`, `WHERE time = x` scans all
+  552k timesteps; LIMIT-bounded scans are still cheap because the scan streams
 - remote stores need consolidated metadata (same as native remote stores)
 - blosc works (c-blosc with nthreads=1 never spawns); rayon runs on a single-thread
   pool built at extension init
@@ -62,5 +63,5 @@ and passes 404s through (the store probes `zarr.json` before `.zmetadata`).
 | `read_zarr_groups` | 0.2s |
 | first 3 rows | 1.3s (one 8-timestep chunk, ~4 MB compressed) |
 | global mean/min/max over first timestep | 0.4s |
-| `ranges=` one day x lat 40..50 x lon -10..5 (3 chunks) | 2.0s |
+| `ranges=` one day x lat 40..50 x lon -10..5 (3 chunks) | 1.6s |
 | `ranges=` 4 hours, global hourly means (1 chunk) | 0.25s |
