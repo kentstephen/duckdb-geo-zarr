@@ -1,5 +1,25 @@
 # Handoff: virtual Zarr (kerchunk manifests) in duckdb-zarr
 
+## Status (2026-09-17, end of implementation session)
+
+Implemented and passing. Branch `virtual-zarr` in `vendor/duckdb-zarr`, one commit `ca35cdd` on top of upstream `main` (`885f8dd`), pushed to the fork `kentstephen/duckdb-zarr` (remote `fork`). No PR opened yet: Stephen wants to review first. The same diff is exported to `patches/duckdb-zarr/virtual-zarr-0001.patch`. Rust unit tests 22/22, `make lint` clean, all six SQL suites pass (`test/sql/read_zarr_kerchunk.test` is new).
+
+What the branch does: `ManifestStore` (`src/zarr_reader/manifest_store.rs`), `format='kerchunk'` on all three table functions, `StoreFormat` in `meta.rs`, zarrs `zlib` + `fletcher32` features, fixtures (NetCDF4 via VirtualiZarr, two GeoTIFFs via virtual-tiff, a hand-built manifest with a missing chunk), README section.
+
+Verified beyond the fixtures (all in scratchpad, not committed): NOAA OISST NetCDF4 on S3 over HTTPS (1M cells, scale_factor, 1.4 s); three OISST days concatenated by `open_virtual_mfdataset` into one manifest; AlphaEarth COG on Source Coop (`tge-labs/aef`, ZSTD, 64 bands) over HTTPS and via DuckDB's S3 endpoint with an anonymous secret, values equal to rasterio; a 10x Genomics HDF5 count matrix (sparse CSR arrays equal to h5py); manifest served over HTTP; slash `dimension_separator`; identical results at 1/8/16 threads; error paths all name the file, offset or feature.
+
+Findings to raise upstream (none filed yet, Stephen decides):
+
+- zarrs `fletcher32` bug: `h5_checksum_fletcher32` tests `len.is_odd()` after the loop has driven `len` to 0, so the odd trailing byte is never folded in. Odd-length payloads fail with a correct on-disk checksum. Still on zarrs main at 0.23.14. Fix is one line (`data.len() % 2 == 1`). Workaround on the branch: `meta::codec_options` disables checksum validation for manifest reads only.
+- virtual-tiff writes `imagecodecs_zstd` / `imagecodecs_deflate` codec ids; the branch aliases them. Its predictor support is a Zarr v3 only `HorizontalDeltaCodec`, and VirtualiZarr's kerchunk writer crashes (`KeyError: 'configuration'`) on it, so predictor-2 COGs (Sentinel-2 on AWS, most GDAL defaults) cannot be indexed to kerchunk at all today.
+- VirtualiZarr's HDF parser rejects the HDF5 scale-offset filter (no numcodecs codec); kerchunk's own indexer rejects it too. The report's `fixedscaleoffset` row cannot be exercised through either producer.
+- duckdb-zarr pre-existing: `read_zarr_metadata` fails for the whole store if any array has an unsupported dtype (`|S18`, `|O`) instead of listing the rest.
+- Memory: a 500k-reference manifest (37 MB JSON) peaks at about 320 MB over the process baseline. Typed deserialisation and shared paths got it down from 470 MB; a single-pass visitor into the entry map would save another ~100 MB. Kerchunk Parquet is the real answer.
+
+Not done: `bz2`, `path_rewrite=`, GRIB (no eccodes on this machine), kerchunk Parquet, Icechunk.
+
+## Original plan (kept for reference)
+
 Goal: implement kerchunk JSON manifest reading in duckdb-zarr for [issue 45](https://github.com/xqlsystems/duckdb-zarr/issues/45) and open a PR upstream. David reviews the PR. The design is in `docs/virtual-zarr-duckdb-zarr.md` (upstream-framed, paste-able into the PR) and `docs/virtual-zarr-report.md` (same study with this repo's context). Read section 4 (design), 5 (codecs) and 8 (first PR shape) of the upstream doc before touching code.
 
 ## Scope of PR 1
