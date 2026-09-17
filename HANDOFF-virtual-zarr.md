@@ -2,7 +2,7 @@
 
 ## Status (2026-09-17, end of implementation session)
 
-Implemented and passing. Branch `virtual-zarr` in `vendor/duckdb-zarr`, one commit `ca35cdd` on top of upstream `main` (`885f8dd`), pushed to the fork `kentstephen/duckdb-zarr` (remote `fork`). No PR opened yet: Stephen wants to review first. The same diff is exported to `patches/duckdb-zarr/virtual-zarr-0001.patch`. Rust unit tests 22/22, `make lint` clean, all six SQL suites pass (`test/sql/read_zarr_kerchunk.test` is new).
+Implemented and passing. Branch `virtual-zarr` in `vendor/duckdb-zarr`, one commit `ca35cdd` on top of upstream `main` (`885f8dd`), pushed to the fork `kentstephen/duckdb-zarr` (remote `fork`). Draft PR opened: https://github.com/xqlsystems/duckdb-zarr/pull/46 (findings in the description; mark ready for review when Stephen is happy). The same diff is exported to `patches/duckdb-zarr/virtual-zarr-0001.patch`. Rust unit tests 22/22, `make lint` clean, all six SQL suites pass (`test/sql/read_zarr_kerchunk.test` is new).
 
 What the branch does: `ManifestStore` (`src/zarr_reader/manifest_store.rs`), `format='kerchunk'` on all three table functions, `StoreFormat` in `meta.rs`, zarrs `zlib` + `fletcher32` features, fixtures (NetCDF4 via VirtualiZarr, two GeoTIFFs via virtual-tiff, a hand-built manifest with a missing chunk), README section.
 
