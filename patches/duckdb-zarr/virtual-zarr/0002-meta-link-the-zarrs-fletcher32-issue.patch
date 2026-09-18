@@ -1,0 +1,25 @@
+From 55e7bec1daedbe101ba7689eb316868bafba2efa Mon Sep 17 00:00:00 2001
+From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
+Date: Thu, 17 Sep 2026 19:01:44 -0400
+Subject: [PATCH 2/5] meta: link the zarrs fletcher32 issue
+
+---
+ src/zarr_reader/meta.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/zarr_reader/meta.rs b/src/zarr_reader/meta.rs
+index 9bd8063..6005f3c 100644
+--- a/src/zarr_reader/meta.rs
++++ b/src/zarr_reader/meta.rs
+@@ -85,7 +85,7 @@ impl StoreFormat {
+ /// filter, and zarrs 0.23's `fletcher32` codec miscomputes the checksum for
+ /// payloads with an odd byte length (the odd trailing byte is never folded
+ /// in), so roughly half of all deflated HDF5 chunks fail validation with a
+-/// correct checksum on disk. Until that is fixed upstream, checksum
++/// correct checksum on disk (zarrs/zarrs#460). Until that is fixed upstream, checksum
+ /// validation is skipped for manifest reads; the checksum bytes are still
+ /// stripped and the data decodes correctly. Real Zarr stores keep validation
+ /// (crc32c in sharded v3 stores, in particular).
+-- 
+2.50.1 (Apple Git-155)
+

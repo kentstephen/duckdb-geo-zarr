@@ -1,0 +1,194 @@
+From cc20d14f4ee0198092882b06e16038c077d2a5da Mon Sep 17 00:00:00 2001
+From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
+Date: Thu, 17 Sep 2026 21:16:49 -0400
+Subject: [PATCH 5/5] docs: move virtual Zarr details to docs/virtual-zarr.md,
+ list features by group
+
+The README keeps a short kerchunk section and links to the new page for
+manifest forms, the codec table, checksum status and the test layout. The
+Status section becomes a feature list instead of numbered phases.
+docs/domains.md gains a remote sensing row for the virtual-tiff fixtures.
+---
+ README.md            | 30 +++++++---------
+ docs/domains.md      |  7 ++--
+ docs/virtual-zarr.md | 86 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 102 insertions(+), 21 deletions(-)
+ create mode 100644 docs/virtual-zarr.md
+
+diff --git a/README.md b/README.md
+index a5f03d1..76c5d0b 100644
+--- a/README.md
++++ b/README.md
+@@ -35,7 +35,8 @@ SELECT dims, shape, data_vars FROM read_zarr_groups('test/fixtures/xarray_tutori
+ ```
+ 
+ See [docs/design.md](docs/design.md) for the full design and
+-[docs/ome-zarr.md](docs/ome-zarr.md) for a small bioimage example.
++[docs/ome-zarr.md](docs/ome-zarr.md) for a small bioimage example, and
++[docs/virtual-zarr.md](docs/virtual-zarr.md) for reading kerchunk manifests.
+ 
+ ## Remote stores
+ 
+@@ -61,26 +62,18 @@ SELECT * FROM read_zarr_metadata('refs.json', format='kerchunk');
+ 
+ The manifest and every file it references are read through DuckDB's filesystem, so
+ local paths, HTTP(S), S3, GCS and Azure all work and the secrets manager applies.
+-Metadata and inline chunks are served from the manifest; each chunk key becomes one
+-range read of the referenced file, and open file handles are reused across chunks.
+-Both manifest versions are accepted (`refs` with `templates`; `gen` is not supported).
+ Kerchunk Parquet manifests and Icechunk virtual references are not supported yet.
++See [docs/virtual-zarr.md](docs/virtual-zarr.md) for the accepted manifest forms,
++the codecs covered by the tests, and the current limitations.
+ 
+-The HDF5 filter pipeline written by VirtualiZarr's HDF parser (shuffle, zlib,
+-fletcher32) decodes natively, as do Deflate and ZSTD GeoTIFF tiles indexed by
+-[virtual-tiff](https://github.com/virtual-zarr/virtual-tiff) (its `imagecodecs_*`
+-codec ids are aliased to the numcodecs ones). GeoTIFFs written with a predictor,
+-and LZW, JPEG or WebP tiles, need codecs zarrs does not have yet. Checksums are
+-not validated on manifest reads for now (see `meta::codec_options`).
++## Features
+ 
+-## Status
+-
+-Active development. Phases 1–3 are implemented:
+-
+-- **Phase 1** — `read_zarr`, `read_zarr_metadata`, `read_zarr_groups` table functions; Zarr v3; CF conventions (fill values, scale/offset, bounds variables, aux coords)
+-- **Phase 2** — Zarr v2, Blosc/LZ4, replacement scan for local `.zarr` paths, projection pushdown
+-- **Phase 3** — HTTP/HTTPS stores, `dims=` and `array_path=` selection, recursive array discovery
+-- **Virtual Zarr** — kerchunk JSON manifests via `format='kerchunk'`
++- **Table functions**: `read_zarr`, `read_zarr_metadata`, `read_zarr_groups`; replacement scan for local `.zarr` paths
++- **Zarr formats**: v2 and v3; consolidated metadata (`.zmetadata`, `consolidated_metadata`); kerchunk JSON manifests via `format='kerchunk'`
++- **Codecs**: Blosc, LZ4, zstd, gzip/zlib, shuffle, fletcher32
++- **Conventions**: CF fill values and `missing_value`, `scale_factor`/`add_offset`, bounds variables, auxiliary coordinates
++- **Storage**: local filesystem, HTTP/HTTPS, S3, GCS and Azure through DuckDB's filesystem and secrets manager
++- **Selection**: `dims=` and `array_path=`, recursive array discovery, projection pushdown
+ 
+ See the [phased plan](docs/design.md#phased-plan) for what's next.
+ 
+@@ -99,6 +92,7 @@ Requires: Rust toolchain, Python 3.11+, make, git.
+ ```shell
+ make test_debug   # SQLLogicTest suite over local stores (or make test_release)
+ make test_http    # HTTP integration tests: synthetic loopback + a real public store
++make test_kerchunk # Hypothesis property tests: VirtualiZarr manifests vs. real Zarr stores
+ ```
+ 
+ SQLLogicTest cases live in `test/sql/`. The HTTP suite (`test/test_http_integration*.py`)
+diff --git a/docs/domains.md b/docs/domains.md
+index ae1bb9c..daad208 100644
+--- a/docs/domains.md
++++ b/docs/domains.md
+@@ -9,10 +9,10 @@ suite includes representative data and queries from that community.
+ | Atmospheric and climate science | Xarray air-temperature data, an ERA5-style multidimensional dataset, named coordinates, packed values, and dimension-group selection. |
+ | Ocean and climate science | ERSST sea-surface temperature and basin-mask data, including CF bounds and missing-value handling. |
+ | Bioimaging | An OME-Zarr v3 multichannel image with a nested label image, including recursive discovery, resolution-level selection, named image axes, and label queries. |
++| Remote sensing | Tiled GeoTIFFs (Deflate float32 with nodata, 3-band int8 ZSTD) indexed by virtual-tiff into kerchunk manifests, read through `format='kerchunk'`. |
+ | General xarray/Zarr users | Synthetic Zarr v2 and v3 fixtures covering numeric types, sparse chunks, scalar coordinates, endianness, and compression. |
+ 
+-The format may work for other communities, including astronomy, genomics, and
+-remote sensing, but those domains do not yet have representative fixtures in
++The format may work for other communities, including astronomy and genomics, but those domains do not yet have representative fixtures in
+ the test suite. Support claims should follow the addition of domain-specific
+ test data and queries.
+ 
+@@ -20,4 +20,5 @@ GeoZarr-style pyramids are a likely next area to evaluate because they share
+ some structural patterns with OME-Zarr multiscales, but they are not currently
+ covered by fixtures.
+ 
+-See [Querying OME-Zarr](ome-zarr.md) for the current bioimage example.
++See [Querying OME-Zarr](ome-zarr.md) for the current bioimage example and
++[Virtual Zarr](virtual-zarr.md) for kerchunk manifests over NetCDF4 and GeoTIFF.
+diff --git a/docs/virtual-zarr.md b/docs/virtual-zarr.md
+new file mode 100644
+index 0000000..b617af1
+--- /dev/null
++++ b/docs/virtual-zarr.md
+@@ -0,0 +1,86 @@
++# Virtual Zarr: kerchunk manifests
++
++A [kerchunk](https://fsspec.github.io/kerchunk/spec.html) JSON manifest describes a
++Zarr store whose chunks are byte ranges inside other files: NetCDF4/HDF5, GRIB,
++GeoTIFF, or another Zarr. Tools such as [VirtualiZarr](https://virtualizarr.readthedocs.io/)
++and [virtual-tiff](https://github.com/virtual-zarr/virtual-tiff) produce them without
++copying any data. `duckdb-zarr` reads a manifest with `format='kerchunk'` on any of
++the three table functions:
++
++```sql
++SELECT * FROM read_zarr('refs.json', format='kerchunk');
++SELECT * FROM read_zarr('s3://bucket/index/refs.json', format='kerchunk', dims=['time','lat','lon']);
++SELECT * FROM read_zarr_metadata('refs.json', format='kerchunk');
++SELECT * FROM read_zarr_groups('refs.json', format='kerchunk');
++```
++
++## How a manifest is read
++
++The manifest and every file it references are read through DuckDB's filesystem, so
++local paths, HTTP(S), S3, GCS and Azure all work and the secrets manager applies.
++Relative paths in the manifest resolve against DuckDB's working directory.
++
++Metadata documents (`.zgroup`, `.zarray`, `.zattrs`) and inline chunks (plain text or
++`base64:`-prefixed) are served from memory. A `.zmetadata` document is synthesised
++when the manifest does not carry one, so array discovery works the same way it does
++for consolidated remote stores. Each chunk key that is a `[path, offset, length]`
++reference becomes one range read of the referenced file; whole-file `[path]`
++references are served from offset zero to the end of the file. Open handles are
++pooled and reused across chunks, since one source file typically backs thousands of
++chunks.
++
++A key the manifest does not list does not exist. For a chunk key zarrs then uses the
++array's fill value, which is how kerchunk represents never-written HDF5 chunks.
++
++## Accepted manifest forms
++
++- Version 0 (a bare reference map) and version 1 (`{"version": 1, "refs": {...}}`).
++- `templates` in version 1 are substituted into reference paths.
++- `gen` (generated references) is rejected with an error naming the feature. Expand
++  the manifest with kerchunk first.
++- `file://` URLs are stripped to plain paths.
++- Bare `NaN` and `Infinity` tokens in metadata documents (Python's `json.dumps`
++  default, common in `_FillValue`) are rewritten to the quoted strings the Zarr v2
++  spec uses.
++
++Kerchunk Parquet manifests and Icechunk virtual references are not supported yet.
++
++## Codecs
++
++Whatever the manifest's `.zarray` names must be a codec zarrs can decode. The cases
++exercised by the test suite:
++
++| Producer | Source | Filters / compressor | Status |
++| --- | --- | --- | --- |
++| VirtualiZarr `HDFParser` | NetCDF4 / HDF5 | `shuffle`, `zlib`, `fletcher32` | Reads. `fletcher32` checksums are not validated on manifest reads (see below). |
++| VirtualiZarr `HDFParser` | NetCDF4 / HDF5, contiguous dataset | none | Reads as one whole-range reference. |
++| virtual-tiff | Tiled GeoTIFF, Deflate | `imagecodecs_deflate` | Reads. The id is aliased to `zlib`. |
++| virtual-tiff | Tiled GeoTIFF, ZSTD | `imagecodecs_zstd` | Reads. The id is aliased to `zstd`. |
++| virtual-tiff | GeoTIFF with a predictor, LZW, JPEG, WebP | not available in zarrs | Not supported. |
++| VirtualiZarr `HDFParser` | HDF5 scale-offset filter | rejected by the producer | Cannot be indexed today. |
++
++Checksums are skipped for manifest reads because zarrs' `fletcher32` implementation
++drops the trailing byte of odd-length payloads
++([zarrs/zarrs#460](https://github.com/zarrs/zarrs/issues/460)), which would fail
++correct HDF5 chunks. The switch is `meta::codec_options`; validation will be
++re-enabled once the fix lands.
++
++## Testing
++
++- `test/sql/read_zarr_kerchunk.test` reads the fixtures below and asserts that each
++  manifest returns exactly the rows of the same data written as a real Zarr store.
++- `test/test_kerchunk_property.py` is a [Hypothesis](https://hypothesis.readthedocs.io/)
++  suite: it generates random datasets and encodings, writes them as NetCDF4 and as
++  Zarr, indexes the NetCDF4 with VirtualiZarr, and checks the extension reads the
++  manifest and the store identically. Run it with `make test_kerchunk` (or
++  `make test_kerchunk_deep` for a longer search).
++
++Fixtures under `test/fixtures/xarray_tutorial/`, all built by
++`scripts/generate_fixtures.py`:
++
++| Fixture | What it covers |
++| --- | --- |
++| `kerchunk_netcdf4.json` (+ `.nc`, `_v2.zarr`) | HDF5 pipeline with shuffle, deflate and fletcher32; deflate only; a contiguous dataset; `_FillValue` masking; inline base64 coordinates. |
++| `kerchunk_zarr_v2.json` (+ `_source.zarr`) | Hand-built manifest with whole-file `[path]` references over Zarr v2 chunk files, one chunk deliberately missing. |
++| `kerchunk_cog_deflate.json`, `kerchunk_cog_zstd.json` (+ `.tif`, `_v2.zarr`) | virtual-tiff over tiled GeoTIFFs: Deflate float32 with a nodata tag, and 3-band int8 ZSTD with the `imagecodecs_zstd` id. |
++| `kerchunk_errors/` | Manifests that reference a missing file, a range past the end of a file, and a truncated chunk, for the error-path tests. |
+-- 
+2.50.1 (Apple Git-155)
+
