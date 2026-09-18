@@ -3,28 +3,51 @@
 ## Status (2026-09-18, after the first review)
 
 Alex (`alxmrs`) reviewed PR 46 on 2026-09-18 (one summary comment, six inline
-threads, no approve or request-changes). Everything he asked for is done as
-three commits on `virtual-zarr` in `vendor/duckdb-zarr`, on top of the two
-already on the PR. Pushed to the fork on 2026-09-18; PR 46 now shows five
-commits. The replies below are saved on the PR as a PENDING review (summary
-body plus one reply per thread), visible only to Stephen until he clicks
-"Submit review" on the PR page (choose Comment, not Approve).
+threads, no approve or request-changes). Everything he asked for is done and
+pushed: PR 46 now has six commits.
 
 ```
+f95bfee CI: kerchunk fixture deps in the pip fallback, lazy VirtualiZarr imports
 cc20d14 docs: move virtual Zarr details to docs/virtual-zarr.md, list features by group
 8d466b1 Property-based tests: VirtualiZarr kerchunk manifests vs. the data they describe
 0589289 manifest_store: put file access behind SourceFile/SourceOpener and test the error paths
-55e7bec meta: link the zarrs fletcher32 issue            (already on the PR)
-ca35cdd Read kerchunk JSON manifests (virtual Zarr) ...  (already on the PR)
+55e7bec meta: link the zarrs fletcher32 issue
+ca35cdd Read kerchunk JSON manifests (virtual Zarr) via format='kerchunk'
 ```
 
-Verified: `cargo test --release` 31/31 (was 22), `make lint` clean, all six
-SQL suites pass including five new error cases, `make test_kerchunk` 2/2 at
-60 examples, deep profile 600 examples per property in 30 s with no failure.
-The same commits are exported to `patches/duckdb-zarr/virtual-zarr/`.
+Verified locally: `cargo test --release` 31/31, `make lint` clean, all six SQL
+suites pass including five new error cases, `make test_kerchunk` 2/2 at 60
+examples, deep profile 600 examples per property with no failure. Exported to
+`patches/duckdb-zarr/virtual-zarr/`.
 
-To ship: open https://github.com/xqlsystems/duckdb-zarr/pull/46/files, review
-the pending comments, and submit the review.
+CI: the linux_amd64 distribution job was failing on every push of this PR
+(including the original head) with `No module named 'virtualizarr'`. Cause:
+that job generates fixtures inside the build container with uv, then runs
+`make test_release` on the host without uv, and the Makefile's pip fallback
+did not list virtualizarr. Fixed in f95bfee (fallback list extended, kerchunk
+imports made lazy so a cached fixture tree needs nothing extra). Both paths
+verified locally. Check the run for f95bfee before replying further.
+
+Review replies: the five inline replies are live on the PR. They were created
+as a pending review at 01:20Z and that review was submitted at 01:22Z with an
+EMPTY body, so the summary comment never appeared. The summary below (now
+including the CI fix note) still needs to be posted as a PR comment:
+
+```
+gh pr comment 46 --repo xqlsystems/duckdb-zarr --body-file docs/pr46-summary-comment.md
+```
+
+**Summary comment text**
+
+> Pushed three commits addressing the review:
+>
+> - `docs/virtual-zarr.md` now holds the manifest forms, codec table, checksum status and test layout. The README keeps a short section and a link, and the Status section lists features by group instead of phases. `docs/domains.md` has a remote sensing row for the virtual-tiff fixtures.
+> - `test/test_kerchunk_property.py` is a Hypothesis suite driven through the extension: random datasets, written as NetCDF4 and indexed by VirtualiZarr's `HDFParser`, must read back through `read_zarr(..., format='kerchunk')` equal to the dataset and equal to the same data in a real Zarr v2 store. `make test_kerchunk` runs 60 examples per property, `make test_kerchunk_deep` 600. Details of what it covers and what it does not are in the thread on `manifest_store.rs`.
+> - File access in `ManifestStore` is behind two traits, so the read loop, pooling and error paths are unit tested against an in-memory filesystem, and the unsafe code is down to two FFI adapters. Four new SQL cases run broken manifests through DuckDB's real filesystem.
+>
+> On `format=`: the enum is `StoreFormat` in `meta.rs`, so Icechunk would be one more variant and one more `open_store` arm. The CI-side cost of the property suite is about 4 s at the default profile.
+>
+> Also fixed the linux_amd64 CI failure, which was already failing on the previous head: that job generates fixtures inside the build container with uv, then runs `make test_release` on the host without uv, and the Makefile's pip fallback did not know about virtualizarr. The fallback list now includes the kerchunk fixture dependencies, and the fixture script imports them only when a kerchunk fixture actually has to be built.
 
 ### What each review thread got
 
@@ -67,7 +90,7 @@ every store, not only manifests.
 
 ### Replies (saved as a pending review on the PR; kept here for reference)
 
-**Summary comment on the PR**
+**Summary comment on the PR (superseded by the version above)**
 
 > Pushed three commits addressing the review:
 >
