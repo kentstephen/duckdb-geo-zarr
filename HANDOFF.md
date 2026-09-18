@@ -1,5 +1,9 @@
 # duckdb-zarr in the browser: notes for Alex
 
+Status 2026-09-18: upstream PRs open and ready for review, waiting on maintainers:
+xqlsystems/duckdb-zarr#48 (wasm support), #49 (`ranges=` pruning plus the routes to
+planner filter pushdown), #46 (kerchunk / virtual Zarr, see `HANDOFF-virtual-zarr.md`).
+
 Live: https://duckdb-geo-zarr.netlify.app (ERA5 map: `map.html`, HRRR map:
 `map-hrrr.html`, SQL consoles: `era5.html`, `hrrr.html`). Everything runs in the tab:
 duckdb-wasm from jsDelivr, the `zarr` extension built for wasm, Zarr read from Source
