@@ -4,8 +4,11 @@
 
 Alex (`alxmrs`) reviewed PR 46 on 2026-09-18 (one summary comment, six inline
 threads, no approve or request-changes). Everything he asked for is done as
-three local commits on `virtual-zarr` in `vendor/duckdb-zarr`, on top of the
-two already on the PR. NOT PUSHED. Nothing has been posted to GitHub.
+three commits on `virtual-zarr` in `vendor/duckdb-zarr`, on top of the two
+already on the PR. Pushed to the fork on 2026-09-18; PR 46 now shows five
+commits. The replies below are saved on the PR as a PENDING review (summary
+body plus one reply per thread), visible only to Stephen until he clicks
+"Submit review" on the PR page (choose Comment, not Approve).
 
 ```
 cc20d14 docs: move virtual Zarr details to docs/virtual-zarr.md, list features by group
@@ -20,8 +23,8 @@ SQL suites pass including five new error cases, `make test_kerchunk` 2/2 at
 60 examples, deep profile 600 examples per property in 30 s with no failure.
 The same commits are exported to `patches/duckdb-zarr/virtual-zarr/`.
 
-To ship: `cd vendor/duckdb-zarr && git push fork virtual-zarr`, then post the
-replies below.
+To ship: open https://github.com/xqlsystems/duckdb-zarr/pull/46/files, review
+the pending comments, and submit the review.
 
 ### What each review thread got
 
@@ -62,7 +65,7 @@ zarrs' bare "unexpected end of file". The scan now wraps chunk decode errors
 as `reading chunk [0, 0, 0] of array 'temperature': ...`. That applies to
 every store, not only manifests.
 
-### Draft replies (post after pushing)
+### Replies (saved as a pending review on the PR; kept here for reference)
 
 **Summary comment on the PR**
 
