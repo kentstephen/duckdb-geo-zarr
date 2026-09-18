@@ -1,7 +1,7 @@
 From cc20d14f4ee0198092882b06e16038c077d2a5da Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 21:16:49 -0400
-Subject: [PATCH 5/6] docs: move virtual Zarr details to docs/virtual-zarr.md,
+Subject: [PATCH 5/7] docs: move virtual Zarr details to docs/virtual-zarr.md,
  list features by group
 
 The README keeps a short kerchunk section and links to the new page for

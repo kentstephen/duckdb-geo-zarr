@@ -1,7 +1,7 @@
 From 8d466b19282db1d0b59f598fd1566dffdf25fd65 Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 21:16:49 -0400
-Subject: [PATCH 4/6] Property-based tests: VirtualiZarr kerchunk manifests vs.
+Subject: [PATCH 4/7] Property-based tests: VirtualiZarr kerchunk manifests vs.
  the data they describe
 
 Hypothesis generates random datasets (1-3 dims, up to 6 per dim, nine

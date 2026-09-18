@@ -1,7 +1,7 @@
 From 05892892d0a2f99f3a23fd0ac72b806a6d788ddb Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 21:16:49 -0400
-Subject: [PATCH 3/6] manifest_store: put file access behind
+Subject: [PATCH 3/7] manifest_store: put file access behind
  SourceFile/SourceOpener and test the error paths
 
 The read loop, handle pooling, range clamping and every error message now

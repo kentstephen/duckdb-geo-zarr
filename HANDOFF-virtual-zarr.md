@@ -4,9 +4,10 @@
 
 Alex (`alxmrs`) reviewed PR 46 on 2026-09-18 (one summary comment, six inline
 threads, no approve or request-changes). Everything he asked for is done and
-pushed: PR 46 now has six commits.
+pushed: PR 46 now has seven commits.
 
 ```
+405f0e5 CI: cache the kerchunk_errors fixtures like every other fixture
 f95bfee CI: kerchunk fixture deps in the pip fallback, lazy VirtualiZarr imports
 cc20d14 docs: move virtual Zarr details to docs/virtual-zarr.md, list features by group
 8d466b1 Property-based tests: VirtualiZarr kerchunk manifests vs. the data they describe
@@ -21,21 +22,27 @@ examples, deep profile 600 examples per property with no failure. Exported to
 `patches/duckdb-zarr/virtual-zarr/`.
 
 CI: the linux_amd64 distribution job was failing on every push of this PR
-(including the original head) with `No module named 'virtualizarr'`. Cause:
-that job generates fixtures inside the build container with uv, then runs
-`make test_release` on the host without uv, and the Makefile's pip fallback
-did not list virtualizarr. Fixed in f95bfee (fallback list extended, kerchunk
-imports made lazy so a cached fixture tree needs nothing extra). Both paths
-verified locally. Check the run for f95bfee before replying further.
+(including the original head). Two causes, both fixed:
 
-Review replies: the five inline replies are live on the PR. They were created
-as a pending review at 01:20Z and that review was submitted at 01:22Z with an
-EMPTY body, so the summary comment never appeared. The summary below (now
-including the CI fix note) still needs to be posted as a PR comment:
+1. `No module named 'virtualizarr'` (f95bfee). The job generates fixtures
+   inside the build container with uv, then runs `make test_release` on the
+   host without uv, and the Makefile's pip fallback did not list virtualizarr.
+   Fallback list extended; kerchunk imports made lazy.
+2. `PermissionError ... kerchunk_errors/missing_file.json` (405f0e5). The
+   container writes fixtures as root; kerchunk_errors was rebuilt every run,
+   so the host could not overwrite it. Now cached like the other fixtures.
 
-```
-gh pr comment 46 --repo xqlsystems/duckdb-zarr --body-file docs/pr46-summary-comment.md
-```
+Both verified locally on the uv path and the pip fallback path. The run for
+405f0e5 is in `action_required`: workflows from the fork need a maintainer
+to click "Approve and run". Not verified green in CI yet. Once it is, post a
+one-line follow-up comment mentioning the fixture caching fix.
+
+Summary comment posted:
+https://github.com/xqlsystems/duckdb-zarr/pull/46#issuecomment-5723922504
+
+Review replies: the five inline replies are live on the PR (created as a
+pending review, submitted at 01:22Z with an empty body, so the summary went
+up as a separate comment; text in `docs/pr46-summary-comment.md`).
 
 **Summary comment text**
 

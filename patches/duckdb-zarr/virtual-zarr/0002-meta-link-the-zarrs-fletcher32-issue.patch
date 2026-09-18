@@ -1,7 +1,7 @@
 From 55e7bec1daedbe101ba7689eb316868bafba2efa Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 19:01:44 -0400
-Subject: [PATCH 2/6] meta: link the zarrs fletcher32 issue
+Subject: [PATCH 2/7] meta: link the zarrs fletcher32 issue
 
 ---
  src/zarr_reader/meta.rs | 2 +-

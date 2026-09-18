@@ -1,7 +1,7 @@
 From ca35cddd779aa3eb3cdc25745f65c0a4a0420c8c Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 18:25:19 -0400
-Subject: [PATCH 1/6] Read kerchunk JSON manifests (virtual Zarr) via
+Subject: [PATCH 1/7] Read kerchunk JSON manifests (virtual Zarr) via
  format='kerchunk'
 
 Adds ManifestStore, a ReadableStorageTraits implementation that serves a

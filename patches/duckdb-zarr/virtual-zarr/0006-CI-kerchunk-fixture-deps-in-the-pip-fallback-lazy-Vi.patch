@@ -1,7 +1,7 @@
 From f95bfee8916833445ba209111c56993e1e9d5a81 Mon Sep 17 00:00:00 2001
 From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
 Date: Thu, 17 Sep 2026 21:51:37 -0400
-Subject: [PATCH 6/6] CI: kerchunk fixture deps in the pip fallback, lazy
+Subject: [PATCH 6/7] CI: kerchunk fixture deps in the pip fallback, lazy
  VirtualiZarr imports
 
 The amd64 distribution job generates fixtures inside the build container
