@@ -66,8 +66,10 @@ static host with no proxy.
   the filter instead of the parameter.
 - PRs: the wasm changes (Cargo gating, `DuckDbStore` routing, rayon pool, short-read
   loop) are upstream as xqlsystems/duckdb-zarr#48, one commit on upstream main
-  (`patches/duckdb-zarr/wasm-support-0001.patch`). `ranges=` and filter pushdown go in a
-  separate PR.
+  (`patches/duckdb-zarr/wasm-support-0001.patch`). `ranges=` (pruning and row clipping, no
+  ISO bounds since upstream #43 adds CF time parsing) is xqlsystems/duckdb-zarr#49, whose
+  body also lays out the routes to planner-driven filter pushdown
+  (`patches/duckdb-zarr/ranges-pruning-0001.patch`).
 
 ## Running it yourself
 
