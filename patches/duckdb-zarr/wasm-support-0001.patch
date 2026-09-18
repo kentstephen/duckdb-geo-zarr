@@ -1,0 +1,217 @@
+From 1b437304d54b77d70b430c34ebcb86a85ee84f51 Mon Sep 17 00:00:00 2001
+From: Stephen Kent <43362477+kentstephen@users.noreply.github.com>
+Date: Fri, 18 Sep 2026 14:37:31 -0400
+Subject: [PATCH] Build and run on wasm32-unknown-emscripten (duckdb-wasm)
+
+- Gate zarrs_http (reqwest::blocking) off wasm and route every store
+  through DuckDbStore there, so DuckDB's own FileSystem does the I/O.
+- Build rayon's global pool with the current thread as its only worker
+  at extension init on wasm, so zarrs' parallel iterators run inline.
+- -fPIC for C code built by cc-rs (zstd-sys), scoped to the wasm triple:
+  duckdb-wasm extensions are emcc side modules.
+- DuckDbStore::get_partial_many loops on short reads. duckdb-wasm's HTTP
+  filesystem returns 16 KiB pieces.
+
+Native builds are unchanged. The wasm platforms stay in excluded_platforms.
+---
+ .cargo/config.toml              |  4 ++++
+ CHANGELOG.md                    |  6 ++++++
+ Cargo.lock                      |  1 +
+ Cargo.toml                      | 11 +++++++++++
+ docs/design.md                  |  2 +-
+ src/lib.rs                      | 10 ++++++++++
+ src/zarr_reader/duckdb_store.rs | 24 ++++++++++++++++++++----
+ src/zarr_reader/meta.rs         | 18 +++++++++++++++++-
+ 8 files changed, 70 insertions(+), 6 deletions(-)
+
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index a1f4f89..1d03f6c 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -24,3 +24,7 @@ rustflags = []
+ 
+ [env]
+ CXXFLAGS_aarch64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
++# duckdb-wasm extensions are emcc side modules, so every object must be PIC.
++# rustc already emits PIC for wasm32-unknown-emscripten; this covers C code built
++# by cc-rs (zstd-sys). Scoped to the wasm triple so native builds are untouched.
++CFLAGS_wasm32_unknown_emscripten = "-fPIC"
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5c4304d..0d82ad3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+ 
+ ## [Unreleased]
+ 
++### Added
++- **WebAssembly build** (`make wasm_mvp`): the extension compiles for `wasm32-unknown-emscripten` and loads in duckdb-wasm. `zarrs_http` (reqwest) is gated off wasm and every store is routed through `DuckDbStore`, so duckdb-wasm's HTTP filesystem does the fetching; rayon's global pool is built with the current thread as its only worker at extension init; C dependencies built by cc-rs (zstd-sys) get `-fPIC` for the wasm triple only. Native builds are unchanged. The wasm platforms remain in `excluded_platforms`.
++
++### Fixed
++- `DuckDbStore::get_partial_many` loops on short reads instead of failing. DuckDB file systems may return fewer bytes than requested (duckdb-wasm's HTTP filesystem returns 16 KiB pieces).
++
+ ## [0.1.3] - 2026-08-04
+ 
+ ### Changed
+diff --git a/Cargo.lock b/Cargo.lock
+index 1434059..d6ee794 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3206,6 +3206,7 @@ dependencies = [
+  "duckdb",
+  "ndarray",
+  "openssl",
++ "rayon",
+  "serde_json",
+  "zarrs",
+  "zarrs_http",
+diff --git a/Cargo.toml b/Cargo.toml
+index 456d0ad..a8e9886 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -36,8 +36,17 @@ zarrs = { version = "0.23", default-features = false, features = [
+ ndarray = "0.17"
+ serde_json = "1"
+ base64 = "0.22"
++
++# zarrs_http -> reqwest::blocking, which does not exist on wasm32. On wasm,
++# HTTP stores go through DuckDbStore (duckdb-wasm's own httpfs) instead.
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ zarrs_http = "0.3.1"
+ 
++# wasm has no threads: zarrs' rayon usage must run on a pool that never spawns.
++# See zarr_init_c_api_internal.
++[target.'cfg(target_family = "wasm")'.dependencies]
++rayon = "1.12"
++
+ # zarrs_http → reqwest → native-tls → openssl-sys. On Linux the DuckDB CI sets
+ # OPENSSL_DIR to a vcpkg path that doesn't exist. Vendored mode compiles OpenSSL
+ # from source and ignores OPENSSL_DIR entirely. macOS and Windows provide TLS via
+@@ -47,5 +56,7 @@ openssl = { version = "0.10", features = ["vendored"] }
+ 
+ # Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
+ # SKIP_TESTS=1 for that target so blosc is never exercised there in CI.
++# On wasm c-blosc compiles against emscripten's pthread stubs; with nthreads=1
++# (zarrs' default) it never calls pthread_create, so it works without threads.
+ [target.'cfg(not(all(target_os = "windows", target_env = "gnu")))'.dependencies]
+ zarrs = { version = "0.23", default-features = false, features = ["blosc"] }
+diff --git a/docs/design.md b/docs/design.md
+index b2c4a23..50f3172 100644
+--- a/docs/design.md
++++ b/docs/design.md
+@@ -16,7 +16,7 @@ A design for `duckdb-zarr` — a Rust DuckDB extension that lets users query Zar
+ - Automatic relational joins across nested groups. Arrays are discovered recursively and can be selected by store-relative path, but each `read_zarr` scan still operates on one compatible dimension group or one explicitly selected array.
+ - Replacing xarray. Users who need lazy array operations should keep using xarray; we just want a SQL handle on the same data.
+ - Custom codecs beyond what `zarrs` already supports.
+-- WebAssembly. The current scaffold ships a `wasm_lib.rs` target; it is not a supported build because `zarrs` and `ndarray` use threading and I/O patterns that don't trivially compile to `wasm32`. 
++- WebAssembly as a distributed platform. The extension compiles for `wasm32-unknown-emscripten` and loads in duckdb-wasm (`make wasm_mvp`): every store is read through DuckDB's own FileSystem (`DuckDbStore`) because `zarrs_http` depends on `reqwest::blocking`, and `zarrs`' rayon work runs on a one-thread pool built at extension init. The wasm platforms stay in `excluded_platforms` until CI builds and tests them. Local (non-URL) store paths are not supported on wasm: array listing for local stores walks the host filesystem.
+ 
+ ## Future integration boundaries (deferred)
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index aeb7b9d..935e13c 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -23,6 +23,16 @@ unsafe fn zarr_init_c_api_internal(
+         }
+         let db: duckdb::ffi::duckdb_database = *db_ptr;
+ 
++        // wasm has no thread spawning; build rayon's global pool with the current
++        // thread as its only worker so zarrs' parallel iterators run inline.
++        #[cfg(target_family = "wasm")]
++        {
++            let _ = rayon::ThreadPoolBuilder::new()
++                .num_threads(1)
++                .use_current_thread()
++                .build_global();
++        }
++
+         replacement_scan::register(db);
+ 
+         let con = Connection::open_from_raw(db.cast())?;
+diff --git a/src/zarr_reader/duckdb_store.rs b/src/zarr_reader/duckdb_store.rs
+index 9b7baf0..9a59328 100644
+--- a/src/zarr_reader/duckdb_store.rs
++++ b/src/zarr_reader/duckdb_store.rs
+@@ -90,11 +90,27 @@ impl ReadableStorageTraits for DuckDbStore {
+                 continue;
+             }
+             let mut buf = vec![0u8; length as usize];
+-            let bytes_read =
+-                unsafe { duckdb_file_handle_read(handle, buf.as_mut_ptr().cast(), length as i64) };
+-            if bytes_read < 0 || bytes_read as u64 != length {
++            // DuckDB file systems may return short reads (duckdb-wasm's HTTP
++            // filesystem hands back 16 KiB pieces), so loop until the buffer
++            // is full or the handle reports EOF (0) / error (<0).
++            let mut filled: usize = 0;
++            let mut bytes_read: i64 = 0;
++            while filled < length as usize {
++                bytes_read = unsafe {
++                    duckdb_file_handle_read(
++                        handle,
++                        buf.as_mut_ptr().add(filled).cast(),
++                        (length as usize - filled) as i64,
++                    )
++                };
++                if bytes_read <= 0 {
++                    break;
++                }
++                filled += bytes_read as usize;
++            }
++            if filled != length as usize {
+                 results.push(Err(StorageError::Other(format!(
+-                    "read of {length} bytes at offset {offset} returned {bytes_read}"
++                    "read of {length} bytes at offset {offset} returned {filled} (last read {bytes_read})"
+                 ))));
+                 continue;
+             }
+diff --git a/src/zarr_reader/meta.rs b/src/zarr_reader/meta.rs
+index aa627a6..b413ace 100644
+--- a/src/zarr_reader/meta.rs
++++ b/src/zarr_reader/meta.rs
+@@ -3,11 +3,14 @@ use std::path::Path;
+ use std::sync::Arc;
+ 
+ use base64::Engine as _;
++#[cfg(not(target_family = "wasm"))]
++use duckdb::ffi::duckdb_destroy_file_system;
+ use duckdb::ffi::{
+     duckdb_client_context, duckdb_client_context_get_file_system, duckdb_destroy_client_context,
+-    duckdb_destroy_file_system, duckdb_file_system, duckdb_table_function_get_client_context,
++    duckdb_file_system, duckdb_table_function_get_client_context,
+ };
+ use zarrs::array::Array;
++#[cfg(not(target_family = "wasm"))]
+ use zarrs::filesystem::FilesystemStore;
+ use zarrs::storage::{Bytes, ReadableStorageTraits, StoreKey};
+ 
+@@ -58,6 +61,7 @@ pub fn is_remote_scheme(path: &str) -> bool {
+ /// - S3/GCS/Azure → `DuckDbStore` backed by the provided `file_system` handle
+ ///   (the store takes ownership and destroys it on drop)
+ /// - Local path → `zarrs::FilesystemStore` (destroys the handle if provided)
++/// - wasm32: every path → `DuckDbStore` (no `zarrs_http`, no host filesystem)
+ ///
+ /// Remote stores are additionally wrapped with an in-memory consolidated-
+ /// metadata cache when one is available (see [`with_consolidated_cache`]),
+@@ -68,6 +72,18 @@ pub fn open_store(
+     file_system: Option<duckdb_file_system>,
+ ) -> Result<ZarrStore, Box<dyn std::error::Error>> {
+     let lower = path.to_ascii_lowercase();
++    // On wasm there is no reqwest::blocking and no host filesystem: every path
++    // (HTTP included, and files registered in duckdb-wasm's virtual FS) is read
++    // through DuckDB's own FileSystem via DuckDbStore.
++    #[cfg(target_family = "wasm")]
++    let store: ZarrStore = {
++        let _ = &lower;
++        let fs = file_system.ok_or(
++            "wasm build requires a DuckDB FileSystem handle (call from a table function bind)",
++        )?;
++        Arc::new(DuckDbStore::new(fs, path))
++    };
++    #[cfg(not(target_family = "wasm"))]
+     let store: ZarrStore = if lower.starts_with("http://") || lower.starts_with("https://") {
+         if let Some(mut fs) = file_system {
+             unsafe { duckdb_destroy_file_system(&mut fs) };
+-- 
+2.50.1 (Apple Git-155)
+

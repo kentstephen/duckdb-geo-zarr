@@ -64,9 +64,10 @@ static host with no proxy.
 - If planner pushdown ever becomes possible in the C API, `ranges=` maps onto it
   directly: the same `build_work_units_pruned` and keep-mask code would take bounds from
   the filter instead of the parameter.
-- Splitting for PRs: the wasm changes (Cargo gating, `DuckDbStore` routing, rayon pool,
-  short-read loop) are separable from `ranges=`; they live in the same commits now and
-  would be split at submit time.
+- PRs: the wasm changes (Cargo gating, `DuckDbStore` routing, rayon pool, short-read
+  loop) are upstream as xqlsystems/duckdb-zarr#48, one commit on upstream main
+  (`patches/duckdb-zarr/wasm-support-0001.patch`). `ranges=` and filter pushdown go in a
+  separate PR.
 
 ## Running it yourself
 
